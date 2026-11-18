@@ -299,7 +299,7 @@ export default Object.freeze({
   "crossing.title": "人物交叉优化（实验性）",
   "crossing.hint": "优化有人物在画面中交叉时的效果",
   "crossing.tooltip": "用 SAM2.1 分割人物、在遮挡时保持身体尺度，并合并被切断的跟踪身份。适合多人交叉、互相遮挡的素材；会增加一次分割的耗时。仅作实验用途。",
-  "crossing.missing": "需先在「模型」下载 SAM 2.1 人物分割模型",
+  "crossing.missing": "需先在「模型」下载 SAM 2.1 运行组件与分割模型",
   "crossing.active": "交叉优化",
   "crossing.fallback": "交叉优化未生效",
   "correction.title": "接触修正",

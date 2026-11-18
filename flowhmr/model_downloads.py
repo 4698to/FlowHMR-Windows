@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from . import model_files as files, model_sources as sources
-from . import hamer_setup
+from . import hamer_setup, sam2_setup
 
 
 _CHUNK = 1024 * 1024
@@ -156,16 +156,31 @@ def download_file(asset, destination, directory, progress, check, *, subject="�
     raise DownloadError(str(failure), failure.code, **failure.params) from last_error
 
 
-def missing_downloads(device, ckpt=None, config=None, *, include_hamer=False):
-    """Plan only public files used by this installation; never download the licensed bundle."""
+def missing_downloads(device, ckpt=None, config=None, *, include_hamer=False,
+                      include_base=False, include_crossing=False):
+    """Plan only public files used by this installation; never download the licensed bundle.
+
+    The torso base checkpoint and the SAM 2.1 component are optional, exactly like
+    HaMeR: they are downloaded when the user asks for them, not by "download all".
+    """
     active_flowhmr = {p.resolve() for p in files.flowhmr_paths(ckpt, config)}
     plan = {}
     for name, assets in sources.PUBLIC_ASSETS.items():
+        if name == "flowhmr_base" and not include_base:
+            continue
+        if name == "sam2" and not include_crossing:
+            continue
         pending = tuple(asset for asset in assets
                         if not files.file_present(files.resolve_model(asset.relative))
                         and (name != "flowhmr" or files.resolve_model(asset.relative).resolve() in active_flowhmr))
         if pending:
             plan[name] = pending
+    if include_crossing:
+        assets = list(plan.get("sam2", ()))
+        if not sam2_setup.code_available():
+            assets.insert(0, sources.SAM2_CODE)
+        if assets:
+            plan["sam2"] = tuple(assets)
     if include_hamer and str(device).split(":", 1)[0] == "cuda":
         hamer = []
         if not hamer_setup.runtime_installed():
@@ -208,6 +223,14 @@ def _install_group(assets, progress, check):
             except ValueError as error:
                 path.unlink(missing_ok=True)
                 raise DownloadError("HaMeR 运行组件校验失败，请重试。", "transfer_hamer_archive") from error
+            path.unlink(missing_ok=True)
+        elif asset == sources.SAM2_CODE:
+            progress("install", path.name, 0, 0)
+            try:
+                sam2_setup.install_code(path, check=check)
+            except ValueError as error:
+                path.unlink(missing_ok=True)
+                raise DownloadError("SAM 2.1 运行组件校验失败，请重试。", "transfer_sam2_component") from error
             path.unlink(missing_ok=True)
         elif asset == sources.HAMER_ARCHIVE:
             _install_hamer_archive(progress, check, path)

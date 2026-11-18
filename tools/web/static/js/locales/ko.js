@@ -299,7 +299,7 @@ export default Object.freeze({
   "crossing.title": "인물 교차 최적화(실험적)",
   "crossing.hint": "화면에서 인물이 교차할 때의 효과를 개선",
   "crossing.tooltip": "SAM 2.1로 인물을 분할하고 가려진 동안 신체 크기를 유지하며 끊긴 추적 ID를 병합합니다. 인물이 교차하거나 서로 가리는 영상에 적합하며, 분할 단계가 한 번 더 필요합니다. 실험적 기능입니다.",
-  "crossing.missing": "먼저 「모델」에서 SAM 2.1 인물 분할 모델을 다운로드하세요",
+  "crossing.missing": "먼저 「모델」에서 SAM 2.1 실행 구성 요소와 분할 모델을 다운로드하세요",
   "crossing.active": "교차 최적화",
   "crossing.fallback": "교차 최적화 미적용",
   "correction.title": "접촉 보정",

@@ -299,7 +299,7 @@ export default Object.freeze({
   "crossing.title": "Crossing optimisation (experimental)",
   "crossing.hint": "Improves results when people cross in frame",
   "crossing.tooltip": "Segments people with SAM 2.1, keeps body scale through occlusion and merges split tracking identities. Useful for clips where people cross and cover each other; adds one segmentation pass. Experimental.",
-  "crossing.missing": "Download the SAM 2.1 person segmentation model first",
+  "crossing.missing": "Download the SAM 2.1 runtime component and model in Models first",
   "crossing.active": "Crossing opt",
   "crossing.fallback": "Crossing opt skipped",
   "correction.title": "Contact correction",

@@ -26,7 +26,12 @@ HAMER_SOURCE_SHA256 = "fba22b57f7a89a0af981ee064b06603a4c527bfd347331a0b369e5e4d
 SAM_REPO = "facebook/sam-3d-body-dinov3"
 VGGT_REPO = "facebook/VGGT-Omega"
 # Optional SAM 2.1 person segmentation used by the crossing optimisation.
-SAM2_REPO = "facebook/sam2.1-hiera-small"
+SAM2_REPO = "KyanChen/sam2.1-hiera-small"
+SAM2_CODE_REPO = "facebookresearch/sam2"
+SAM2_SOURCE_REVISION = "2b90b9f5ceec907a1c18123530e92e794ad901a4"
+SAM2_SOURCE_URL = f"https://codeload.github.com/{SAM2_CODE_REPO}/zip/{SAM2_SOURCE_REVISION}"
+SAM2_SOURCE_SHA256 = "fe93082a71a885a427894b1eab76341768781b6b58a298a0717e03862097d137"
+SAM2_SOURCE_SIZE = 55952852
 
 # The publishers' ModelScope files match the original model weights byte for byte.
 PERCEPTION_DOWNLOADS = (
@@ -77,11 +82,12 @@ PUBLIC_ASSETS = {
     # Optional SAM 2.1 checkpoint for the experimental crossing optimisation.
     "sam2": (Asset(files.SAM2_CROSSING, 184416285,
                    "6d1aa6f30de5c92224f8172114de081d104bbd23dd9dc5c58996f0cad5dc4d38",
-                   (f"{HF_MIRROR}/{SAM2_REPO}/resolve/main/sam2.1_hiera_small.pt",
-                    f"{HF_OFFICIAL}/{SAM2_REPO}/resolve/main/sam2.1_hiera_small.pt")),),
+                   (modelscope_file(SAM2_REPO, "sam2.1_hiera_small.pt"),)),),
 }
 
 HAMER_CODE = Asset(".downloads/hamer-source.zip", 2314326, HAMER_SOURCE_SHA256, (HAMER_SOURCE_URL,))
+# Optional SAM 2.1 inference code, installed on demand like the HaMeR component.
+SAM2_CODE = Asset(".downloads/sam2-source.zip", SAM2_SOURCE_SIZE, SAM2_SOURCE_SHA256, (SAM2_SOURCE_URL,))
 HAMER_ARCHIVE = Asset(".downloads/hamer_demo_data.tar.gz", 6037554929, None, (
     HAMER_ARCHIVE_URL,
     "https://drive.usercontent.google.com/download?id=1mv7CUAnm73oKsEEG1xE3xH2C_oqcFSzT&export=download&confirm=t",

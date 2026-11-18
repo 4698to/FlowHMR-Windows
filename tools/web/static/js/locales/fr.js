@@ -299,7 +299,7 @@ export default Object.freeze({
   "crossing.title": "Optimisation des croisements (expérimental)",
   "crossing.hint": "Améliore le résultat lorsque des personnes se croisent à l’écran",
   "crossing.tooltip": "Segmente les personnes avec SAM 2.1, conserve l’échelle du corps pendant l’occlusion et fusionne les identités de suivi coupées. Utile quand des personnes se croisent et se masquent ; ajoute une passe de segmentation. Expérimental.",
-  "crossing.missing": "Téléchargez d’abord le modèle de segmentation de personnes SAM 2.1",
+  "crossing.missing": "Téléchargez d'abord le composant d’exécution SAM 2.1 et le modèle de segmentation dans « Modèles »",
   "crossing.active": "Optim. croisements",
   "crossing.fallback": "Optim. croisements ignorée",
   "correction.title": "Correction des contacts",

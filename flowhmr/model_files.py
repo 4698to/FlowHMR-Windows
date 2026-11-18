@@ -8,6 +8,8 @@ from zipfile import BadZipFile, ZipFile
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODEL_ROOT = PROJECT_ROOT / "models"
 HAMER_RUNTIME = PROJECT_ROOT / "third_party/hamer_inference"
+# Optional SAM 2.1 inference code installed from the verified upstream archive.
+SAM2_RUNTIME = PROJECT_ROOT / "third_party/sam2_runtime"
 FLOWHMR_CKPT = "flowhmr_latest/flowhmr_latest.ckpt"
 FLOWHMR_CONFIG = "flowhmr_latest/config.yml"
 # Optional base checkpoint used by the torso-motion optimization.

@@ -53,13 +53,14 @@ from flowhmr.utils.runtime_preview_thumbnail import ensure_thumbnail
 from flowhmr.core.bodymodels.body_variants import available_variants, model_path, write_preview_vertices
 from flowhmr.model_files import (
     FLOWHMR_BASE_FILES, HAMER_FILES, MODEL_ROOT, SAM3D_FILES, VGGT, SMPLH_FILES, core_model_paths,
-    crossing_optimization_available, ensure_model_folders, flowhmr_base_paths, flowhmr_paths, missing_model_paths,
+    ensure_model_folders, flowhmr_base_paths, flowhmr_paths, missing_model_paths,
     resolve_model, smplh_reference, torso_optimization_available,
 )
 from flowhmr import model_integrity
 from flowhmr.character_files import CharacterFiles, KEY_ENV as CHARACTER_KEY_ENV, MAX_MODEL_BYTES
 from flowhmr.character_library import CharacterLibrary, RetargetPresetError, THUMBNAIL_BYTES
 from flowhmr.model_sources import PUBLIC_ASSETS
+from flowhmr.sam2_setup import crossing_issue
 from flowhmr.model_import import ModelImporter, ModelImportError
 from flowhmr.model_inventory import model_inventory
 from flowhmr.model_downloads import ACTIVE_DOWNLOAD, DownloadError, ModelDownloads, missing_downloads
@@ -1184,9 +1185,10 @@ def run_job(job_id):
         if params.get("torso_opt") and not torso_optimization_available():
             raise UserMessage("请先在右上角「模型」下载可选的 FlowHMR 躯干模型（base），再开启躯干动作优化。",
                               "torso_model_missing")
-        if params.get("crossing_opt") and not crossing_optimization_available():
-            raise UserMessage("请先在右上角「模型」下载可选的 SAM 2.1 人物分割模型，再开启人物交叉优化。",
-                              "crossing_model_missing")
+        if params.get("crossing_opt"):
+            component_issue = crossing_issue()
+            if component_issue is not None:
+                raise UserMessage(component_issue[1], component_issue[0])
         loading_models = (ENGINE is None or ENGINE.body_reference != (requested_reference or smplh_reference())
                           or ENGINE.sam_backend != sam_backend)
         job.update(status="running", loading_models=loading_models, started=time.time(),
@@ -1884,11 +1886,17 @@ def api_info():
     inventory = model_inventory(ARGS.device, ARGS.ckpt, config)
     rocm_profile = runtime_rocm.PROFILES.get(RUNTIME.active)
     if local_model_request():
-        plan = missing_downloads(ARGS.device, ARGS.ckpt, config, include_hamer=True)
-        inventory["download_sizes"] = {group: sum(asset.size for asset in assets) for group, assets in plan.items()}
+        plan = missing_downloads(ARGS.device, ARGS.ckpt, config, include_hamer=True,
+                                 include_base=True, include_crossing=True)
+        # The torso base and SAM 2.1 are opt-in: offer their buttons but keep
+        # their bytes out of the "download all" total, which skips them.
+        optional = {"flowhmr_base", "sam2"}
+        inventory["download_sizes"] = {group: sum(asset.size for asset in assets)
+                                       for group, assets in plan.items()}
         inventory["hamer_download_bytes"] = inventory["download_sizes"].get("hamer", 0)
         inventory["downloadable"] = list(plan)
-        inventory["download_bytes"] = sum(inventory["download_sizes"].values())
+        inventory["download_bytes"] = sum(size for group, size in inventory["download_sizes"].items()
+                                          if group not in optional)
         inventory["download"] = MODEL_DOWNLOADS.snapshot()
         inventory["import"] = MODEL_IMPORTER.status()
     return jsonify({
@@ -1904,7 +1912,7 @@ def api_info():
         "postprocess_available": native_correction_available(),
         "hamer_available": any(item["id"] == "hamer" and item["status"] == "ready" for item in inventory["items"]),
         "torso_available": torso_optimization_available(),
-        "crossing_available": crossing_optimization_available(),
+        "crossing_available": crossing_issue() is None,
         "body_variants": available_variants(),
         "body_reference": smplh_reference(),
         "sam_manual_default": getattr(ARGS, "sam_chunk_default", 16),
@@ -2000,7 +2008,10 @@ def api_model_download():
         if MODEL_IMPORTER.active or MODEL_VERIFY_LOCK.locked():
             return api_error("model_operation_busy", "正在导入或校验模型，请稍后再下载。", 409)
         config = getattr(ARGS, "model_cfg", None)
-        plan = missing_downloads(ARGS.device, ARGS.ckpt, config, include_hamer=group in ("all", "hamer"))
+        plan = missing_downloads(ARGS.device, ARGS.ckpt, config,
+                                 include_hamer=group in ("all", "hamer"),
+                                 include_base=group == "flowhmr_base",
+                                 include_crossing=group == "sam2")
         if group is not None and group != "all":
             plan = {group: plan[group]} if group in plan else {}
         return jsonify(MODEL_DOWNLOADS.start(plan, scope=group))

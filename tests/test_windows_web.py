@@ -322,12 +322,19 @@ class ModelIntegrityTest(unittest.TestCase):
                   server.app.test_client() as client):
                 self.assertEqual(client.post("/api/models/download", json={}).status_code, 200)
                 core = start.call_args.args[0]
-                self.assertEqual(set(core), set(sources.PUBLIC_ASSETS))
+                # The torso base and SAM 2.1 are opt-in components, like HaMeR.
+                self.assertEqual(set(core), set(sources.PUBLIC_ASSETS) - {"flowhmr_base", "sam2"})
                 self.assertEqual(client.post("/api/models/download", json={"group": "hamer"}).status_code, 200)
                 optional = start.call_args.args[0]
                 self.assertEqual(set(optional), {"hamer"})
                 self.assertTrue(set(sources.HAMER_DIRECT_ASSETS) <= set(optional["hamer"]))
                 self.assertNotIn(sources.HAMER_ARCHIVE, optional["hamer"])
+                self.assertEqual(client.post("/api/models/download", json={"group": "flowhmr_base"}).status_code, 200)
+                self.assertEqual(set(start.call_args.args[0]), {"flowhmr_base"})
+                self.assertEqual(client.post("/api/models/download", json={"group": "sam2"}).status_code, 200)
+                crossing = start.call_args.args[0]
+                self.assertEqual(set(crossing), {"sam2"})
+                self.assertIn(sources.SAM2_CODE, crossing["sam2"])
                 self.assertEqual(client.post("/api/models/download", json={"group": "vggt"}).status_code, 200)
                 self.assertEqual(set(start.call_args.args[0]), {"vggt"})
                 self.assertEqual(client.post("/api/models/download", json={"group": "all"}).status_code, 200)

@@ -299,7 +299,7 @@ export default Object.freeze({
   "crossing.title": "人物交差の最適化（実験的）",
   "crossing.hint": "画面内で人物が交差するときの効果を改善",
   "crossing.tooltip": "SAM 2.1 で人物を分割し、遮蔽中も体の大きさを保ち、途切れた追跡 ID を統合します。人物が交差・遮蔽する素材向け。分割の処理時間が増えます。実験的機能です。",
-  "crossing.missing": "先に「モデル」で SAM 2.1 人物分割モデルをダウンロードしてください",
+  "crossing.missing": "先に「モデル」で SAM 2.1 の実行コンポーネントと分割モデルをダウンロードしてください",
   "crossing.active": "交差最適化",
   "crossing.fallback": "交差最適化は未適用",
   "correction.title": "接地補正",

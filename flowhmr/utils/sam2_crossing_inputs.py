@@ -301,7 +301,12 @@ def prepare_crossing_inputs(processor, video_path, target_dir, *, device=None, m
     ckpt = _repo_root() / SAM2_CHECKPOINT
     if not ckpt.is_file():
         raise CrossingInputsError(f"SAM2 权重缺失：{ckpt}")
-    from sam2.build_sam import build_sam2_video_predictor
+    from flowhmr.sam2_setup import crossing_issue
+    from flowhmr.utils.sam2_builder import build_video_predictor
+
+    component_issue = crossing_issue()
+    if component_issue is not None:
+        raise CrossingInputsError(component_issue[1])
 
     parent = target.parent
     parent.mkdir(parents=True, exist_ok=True)
@@ -313,8 +318,8 @@ def prepare_crossing_inputs(processor, video_path, target_dir, *, device=None, m
         report(0.25, "人物交叉优化：导出视频帧")
         _extract_frames(video_path, frames_dir, total, cancel_check)
         check()
-        predictor = build_sam2_video_predictor(SAM2_CONFIG, str(ckpt),
-                                               device=str(device or processor.detector.device))
+        predictor = build_video_predictor(SAM2_CONFIG, str(ckpt),
+                                          device=str(device or processor.detector.device))
         predictor.eval()
         report(0.35, "人物交叉优化：SAM2 分割与跟踪")
 

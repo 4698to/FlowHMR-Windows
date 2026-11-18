@@ -3,6 +3,7 @@
 from . import model_files as files
 from . import model_integrity
 from . import model_sources as sources
+from .sam2_setup import crossing_issue
 from .utils.runtime_hamer import hamer_model_details
 
 
@@ -34,6 +35,14 @@ def _item(key, name, paths, folder, links, *, required=True, issue=None, issue_c
 
 def model_inventory(device, ckpt=None, config=None):
     hamer_paths, issue_code, issue = hamer_model_details(device)
+    # The SAM 2.1 component is downloaded on demand; report a missing runtime only
+    # when the checkpoint is already installed (otherwise "missing" explains it).
+    sam2_issue = crossing_issue()
+    if sam2_issue and sam2_issue[0] == "crossing_model_missing":
+        sam2_issue = None
+    elif sam2_issue:
+        sam2_issue = ("crossing_code_missing",
+                      "缺少 SAM 2.1 运行组件，请在「模型」中下载。")
     bundle = tuple(map(files.resolve_model, (files.SMPLH_FILES["female"], files.SMPLH_FILES["male"], *files.MANO_FILES)))
     mano_link = [("MANO 官网下载（需登录）", sources.MANO_URL)]
     reference = files.smplh_reference()
@@ -56,9 +65,9 @@ def model_inventory(device, ckpt=None, config=None):
                ("官方仓库", f"{sources.HF_OFFICIAL}/{sources.FLOWHMR_REPO}/tree/main/flowhmr_base")],
               required=False),
         _item("sam2", "SAM 2.1 人物分割（交叉优化）", files.sam2_crossing_paths(), "models/sam2",
-              [("镜像入口", f"{sources.HF_MIRROR}/{sources.SAM2_REPO}/tree/main"),
-               ("官方仓库", f"{sources.HF_OFFICIAL}/{sources.SAM2_REPO}/tree/main")],
-              required=False),
+              [("魔搭下载", f"{sources.MODELSCOPE}/models/{sources.SAM2_REPO}")],
+              required=False, issue=sam2_issue[1] if sam2_issue else None,
+              issue_code=sam2_issue[0] if sam2_issue else None),
         _item("yolox", "YOLOX-L", (files.resolve_model(files.YOLOX),), "models/yolox",
               [("官方权重", sources.YOLOX_URL)]),
         _item("sam", "SAM 3D Body · DINOv3", files.sam3d_paths(), "models/sam-3d-body-dinov3",

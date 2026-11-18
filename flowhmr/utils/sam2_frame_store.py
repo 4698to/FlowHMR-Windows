@@ -15,7 +15,10 @@ import torch
 
 def _load_img_as_tensor(path, image_size):
     # Imported lazily so the module (and its unit tests) do not require the
-    # vendored SAM 2 package unless video prediction actually runs.
+    # SAM 2 package unless video prediction actually runs.
+    from flowhmr.utils.sam2_builder import ensure_importable
+
+    ensure_importable()
     from sam2.utils.misc import _load_img_as_tensor as loader
 
     return loader(path, image_size)
