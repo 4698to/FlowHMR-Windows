@@ -168,6 +168,28 @@ def build_feature_dict(sam_tokens: Tensor, camera_RT: Tensor, device: torch.devi
     return {"feature": feature, "camera_R": camera_R}
 
 
+def _clip_prepared_tracks(tracks, start: int, end: int):
+    """Restrict prepared people to the requested trim window.
+
+    Prepared crossing inputs always cover the whole working video; the default
+    detector only reports the requested range.  Clipping here keeps candidate
+    durations, saved boxes and mask windows consistent between both flows.
+    """
+    from flowhmr.utils.runtime_video_processing import TrackInfo
+
+    clipped = []
+    for track in tracks:
+        keep = (track.frames >= start) & (track.frames <= end)
+        if not np.any(keep):
+            continue
+        frames, boxes = track.frames[keep], track.bboxes[keep]
+        clipped.append(TrackInfo(
+            track.track_id, frames, boxes, length=int(frames.size),
+            avg_area=float(np.prod(boxes[:, 2:] - boxes[:, :2], axis=1).mean()),
+            bytetrack_ids=track.bytetrack_ids, sam2_object_ids=track.sam2_object_ids))
+    return clipped
+
+
 def _limit_track_frames(bbox_path: str, max_frames: int | None,
                         dependent_paths: tuple[str, ...] = (), *, start_frame=0, end_frame=None) -> None:
     """Intersect the requested source range with the full detected track."""
@@ -754,12 +776,13 @@ class V2MInferenceEngine:
     # Stage 2: Detection
     def run_detection(self, working_video: str, sub_dir: str, *,
                       manual_select: bool = False,
-                      progress_cb: Callable[[int, str], None] = None) -> dict:
+                      progress_cb: Callable[[int, str], None] = None,
+                      sam2_identity_objects=None) -> dict:
         video_name = os.path.basename(sub_dir)
         bbox_npz_path = os.path.join(sub_dir, f"{video_name}_bbox.npz")
         camera_npz_path = os.path.join(sub_dir, f"{video_name}_camera.npz")
 
-        if os.path.exists(bbox_npz_path) and os.path.exists(camera_npz_path):
+        if not sam2_identity_objects and os.path.exists(bbox_npz_path) and os.path.exists(camera_npz_path):
             print(f"  [detection] CACHED, loading from npz")
             bbox_data = np.load(bbox_npz_path)
             bbox_xyxy = torch.from_numpy(bbox_data["bbox"])
@@ -776,7 +799,8 @@ class V2MInferenceEngine:
 
         from flowhmr.utils.runtime_video_processing import VideoProcessor
         self._activate_stage(StageName.DETECTION)
-        tracking_result = self.proc.detect_and_track(working_video)
+        tracking_result = self.proc.detect_and_track(
+            working_video, sam2_identity_objects=sam2_identity_objects)
 
         if not tracking_result.tracks:
             print(f"  [detection] No tracks found, falling back to full-image bbox")
@@ -800,6 +824,8 @@ class V2MInferenceEngine:
                     "track_id": track.track_id,
                     "num_frames": track.length,
                     "avg_area": track.avg_area,
+                    "bytetrack_ids": list(track.bytetrack_ids),
+                    "sam2_object_ids": list(track.sam2_object_ids),
                     "thumbnail_path": thumbnail_path,
                 })
             _cb(progress_cb, 60, "Waiting for user selection")
@@ -866,7 +892,10 @@ class V2MInferenceEngine:
                   f"({frame_end - frame_start} frames) / total {tracking_result.total_frames}")
 
         bbox_np = bbox_xyxy.detach().cpu().numpy().astype(np.float32)
-        save_kw = {"bbox": bbox_np, "start_end": np.array([0, bbox_np.shape[0]], dtype=np.int64)}
+        save_kw = {"bbox": bbox_np, "start_end": np.array([0, bbox_np.shape[0]], dtype=np.int64),
+                   "track_id": np.asarray(int(track.track_id), dtype=np.int64),
+                   "bytetrack_ids": np.asarray(track.bytetrack_ids, dtype=np.int64),
+                   "sam2_object_ids": np.asarray(track.sam2_object_ids, dtype=np.int64)}
         if frame_range is not None:
             save_kw["frame_range"] = np.array(frame_range, dtype=np.int64)
         np.savez(bbox_npz_path, **save_kw)
@@ -1078,7 +1107,10 @@ class V2MInferenceEngine:
                       cancel_check: Callable[[], None] = None,
                       sam_chunk_size: int | None = 16,
                       sam_hand_stride: int = 1,
-                      details_callback: Callable[[dict], None] = None) -> str:
+                      details_callback: Callable[[dict], None] = None,
+                      sam2_mask_payload: dict | None = None,
+                      sam2_identity_objects=None,
+                      prepared_inputs: bool | None = None) -> str:
         """Video -> SMPL-H motion.
 
         static_camera: skip VGGT and use a fixed pose with default intrinsics.
@@ -1094,6 +1126,30 @@ class V2MInferenceEngine:
         to let a user pick. ``candidates`` lists those tracks (id, frame range, boxes);
         returning None / an out-of-range index keeps ``default``. Without it the longest /
         largest track is used.
+
+        sam2_mask_payload: optional precomputed SAM2 person track for the whole
+        video. ``{"bbox": (frames, 4) float32, "start_end": [first, last],
+        "masks": (frames, H, W) uint8 or None}``. The mask-derived boxes replace
+        ByteTrack (so crossings/occlusions keep one identity), and the masks are
+        fed to SAM 3D Body's mask prompt. There is deliberately no fallback: a
+        payload that does not cover the video raises instead of silently using
+        the tracker.
+
+        sam2_identity_objects: optional Sequence[Sam2Object]. ByteTrack
+        fragments that one continuously tracked SAM2 object covers are merged
+        before person selection. The earliest ByteTrack ID becomes canonical;
+        all original IDs remain in ``TrackInfo.bytetrack_ids``. When supplied,
+        stale bbox caches are bypassed.
+
+        A ``sam2_inputs/manifest.json`` beside the working video takes
+        precedence over raw ByteTrack fragments, but only when ``prepared_inputs``
+        allows it: ``False`` ignores such a cache (the GUI passes the live
+        crossing-optimisation toggle), ``None`` keeps the offline auto-detect
+        behaviour used by the benchmark scripts. It supplies canonical person
+        candidates, causal body boxes and lossless batch-decoded masks from one
+        SAM2 run. The clean video and cached inputs are verified by hash; GUI
+        batch children inherit this same cache. No model is loaded by the input
+        loader itself.
         """
         if sam_chunk_size is not None and (type(sam_chunk_size) is not int or sam_chunk_size < 1):
             raise ValueError("sam_chunk_size must be a positive integer or automatic")
@@ -1148,7 +1204,55 @@ class V2MInferenceEngine:
             "sam3d_feat.pt.hands.npy", "sam3d_feat_static.pt.hands.npy",
         ))
 
-        if cached_detection_matches(bbox_npz_path, detection_range):
+        prepared = None
+        prepared_dir = Path(sub_dir) / "sam2_inputs"
+        if prepared_inputs is not False and (prepared_dir / "manifest.json").is_file():
+            from flowhmr.utils.sam2_person_inputs import load_person_inputs
+
+            prepared = load_person_inputs(prepared_dir, working_video)
+        sam2_masks = None
+        if sam2_mask_payload is not None and prepared is not None:
+            raise ValueError("Provide either prepared SAM2 inputs or sam2_mask_payload, not both")
+        if sam2_mask_payload is not None:
+            from flowhmr.utils.runtime_capabilities import detection_request_key
+
+            payload_start, payload_end = (int(value) for value in sam2_mask_payload["start_end"])
+            payload_bbox = np.asarray(sam2_mask_payload["bbox"], dtype=np.float32)
+            if payload_bbox.ndim != 2 or payload_bbox.shape[1] != 4:
+                raise ValueError("sam2_mask_payload bbox must have shape (frames, 4)")
+            if payload_end - payload_start + 1 != payload_bbox.shape[0]:
+                raise ValueError("sam2_mask_payload frame range does not match its bbox")
+            if payload_start != 0 or payload_end != video_meta.total_frames - 1:
+                raise ValueError(
+                    "sam2_mask_payload must cover the whole video: got frames "
+                    f"{payload_start}-{payload_end}, video has {video_meta.total_frames}")
+            if not np.isfinite(payload_bbox).all() or np.any(payload_bbox[:, 2:] <= payload_bbox[:, :2]):
+                raise ValueError("sam2_mask_payload contains invalid boxes; fill missing frames first")
+            payload_masks = sam2_mask_payload.get("masks")
+            if payload_masks is not None:
+                payload_masks = np.asarray(payload_masks)
+                if payload_masks.ndim == 4 and payload_masks.shape[-1] == 1:
+                    payload_masks = payload_masks[..., 0]
+                if payload_masks.ndim != 3 or payload_masks.shape[0] != payload_bbox.shape[0]:
+                    raise ValueError("sam2_mask_payload masks do not match its bbox")
+                sam2_masks = payload_masks
+            # The SAM2 mask track replaces ByteTrack for this job. Drop stale
+            # caches that were computed from the old tracker boxes.
+            for path in dependent_paths:
+                Path(path).unlink(missing_ok=True)
+            np.savez(
+                bbox_npz_path, bbox=payload_bbox,
+                start_end=np.array([0, payload_bbox.shape[0] - 1], dtype=np.int64),
+                detection_request=np.asarray(detection_request_key(detection_range)),
+            )
+            print(f"  [bbox] SAM2 mask track: {payload_bbox.shape[0]} frames")
+
+        detection_cached = not sam2_identity_objects and cached_detection_matches(bbox_npz_path, detection_range)
+        if prepared is not None:
+            from flowhmr.utils.sam2_person_inputs import prepared_detection_matches
+
+            detection_cached = prepared_detection_matches(bbox_npz_path, detection_range, prepared[2])
+        if sam2_mask_payload is not None or detection_cached:
             print(f"  [bbox] skip (exists): {bbox_npz_path}")
             _pcb(StageName.DETECTION, 100, "Bbox cached")
         else:
@@ -1164,12 +1268,24 @@ class V2MInferenceEngine:
                     last_progress = progress
                     _pcb(StageName.DETECTION, progress, f"Detecting people: {done}/{total} frames")
 
-            self._activate_stage(StageName.DETECTION)
-            try:
-                result = self.proc.detect_and_track(working_video, start_frame=start_frame, end_frame=last_requested,
-                                                    on_progress=on_detected, cancel_check=cancel_check)
-            finally:
-                self.release_stage()
+            if prepared is not None:
+                from flowhmr.utils.runtime_video_processing import TrackingResult
+
+                window_start = detection_range[0]
+                window_end = detection_range[1] if detection_range[1] is not None else prepared[0].total_frames - 1
+                clipped = _clip_prepared_tracks(prepared[0].tracks, window_start, window_end)
+                if not clipped:
+                    raise EmptyPersonRangeError("处理区间里没有准备好的人物，请调整时间轴的起止帧。")
+                result = TrackingResult(clipped, prepared[0].total_frames, prepared[0].width,
+                                        prepared[0].height, (window_start, window_end))
+            else:
+                self._activate_stage(StageName.DETECTION)
+                try:
+                    result = self.proc.detect_and_track(working_video, start_frame=start_frame, end_frame=last_requested,
+                                                        on_progress=on_detected, cancel_check=cancel_check,
+                                                        sam2_identity_objects=sam2_identity_objects)
+                finally:
+                    self.release_stage()
             if result.total_frames != video_meta.total_frames:
                 _details(source_frames=result.total_frames)
             _pcb(StageName.DETECTION, 60, f"Found {len(result.tracks)} person(s)")
@@ -1180,7 +1296,10 @@ class V2MInferenceEngine:
                 track_idx = -1
                 print(f"  [bbox] WARN no_tracks -> full-image bbox x {result.total_frames} frames")
             else:
-                track_idx = VideoProcessor.select_best_track(result)
+                # Prepared identities are ordered left-to-right by the crossing
+                # runner; area is inflated by held body boxes, so it must not
+                # decide the recommended person here.
+                track_idx = 0 if prepared is not None else VideoProcessor.select_best_track(result)
                 # Fragments shorter than this (ByteTrack id switches, passers-by) are not offered.
                 # Scale it for short trims so a second person can still be chosen.
                 scanned_start, scanned_end = result.scanned_range
@@ -1197,6 +1316,8 @@ class V2MInferenceEngine:
                             "preview_start": int(t.frames.min()),
                             "preview_end": int(t.frames.max()),
                             "num_frames": int(t.length), "avg_area": float(t.avg_area),
+                            "bytetrack_ids": list(t.bytetrack_ids),
+                            "sam2_object_ids": list(t.sam2_object_ids),
                             "frames": t.frames[order].astype(int).tolist(),
                             "boxes": np.round(t.bboxes[order].astype(np.float64), 1).tolist(),
                         })
@@ -1211,7 +1332,12 @@ class V2MInferenceEngine:
                       f"/ total={result.total_frames}")
             for path in dependent_paths:
                 Path(path).unlink(missing_ok=True)
-            VideoProcessor.save_detected_track(bbox_npz_path, result, track_idx, detection_range)
+            if prepared is None:
+                VideoProcessor.save_detected_track(bbox_npz_path, result, track_idx, detection_range)
+            else:
+                from flowhmr.utils.sam2_person_inputs import save_prepared_track
+
+                save_prepared_track(bbox_npz_path, result, track_idx, detection_range, prepared[2])
             print(f"  [bbox] saved -> {bbox_npz_path}")
             _pcb(StageName.DETECTION, 100, "Bbox done")
 
@@ -1228,6 +1354,10 @@ class V2MInferenceEngine:
             start_end_arr = data["start_end"].astype(np.int64)
         s, e = int(start_end_arr[0]), int(start_end_arr[1])
         t_track = e - s + 1
+        if prepared is not None:
+            from flowhmr.utils.sam2_person_inputs import mask_stream_for_bbox
+
+            sam2_masks, _ = mask_stream_for_bbox(prepared_dir, bbox_npz_path, working_video)
         long_motion_frames = t_track if t_track > LONG_MOTION_EXPERIMENTAL_THRESHOLD else None
         _details(track_range=[s, e], long_motion_frames=long_motion_frames)
         if long_motion_frames:
@@ -1385,6 +1515,11 @@ class V2MInferenceEngine:
                 start_frame=s,
                 progress_cb=_sam_progress,
             )
+            if sam2_masks is not None:
+                if sam2_masks.shape[0] != t_track:
+                    raise ValueError(
+                        f"SAM2 masks cover {sam2_masks.shape[0]} frames but the track has {t_track}")
+                sam_args["masks"] = sam2_masks
             if estimator is not None:
                 def _batch_progress(info):
                     changed = (info["actual"], info["retries"]) != (batch["actual"], batch["retries"])

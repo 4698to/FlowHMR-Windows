@@ -8,6 +8,19 @@ import * as api from "./api.js";
 
 const CHECK_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
+// Tracking fragments merged into this person by the crossing optimisation.
+function mergedTrackingIds(source) {
+  const ids = source?.bytetrack_ids || [];
+  const own = source?.track_id;
+  return ids.filter((id) => id !== own);
+}
+
+function appendMergedIds(container, source) {
+  const merged = mergedTrackingIds(source);
+  if (!merged.length) return;
+  container.append(el("span", "person-meta num", m("person.merged_ids", { ids: merged.join(", ") })));
+}
+
 export function initPersonSelect(bus) {
   let jobId = null;
   let candidates = [];
@@ -46,6 +59,7 @@ export function initPersonSelect(bus) {
       name.append(chip, el("span", "", m("person.number", { number: i + 1 })), tag);
       text.append(name, el("span", "person-meta num",
         m("person.track_duration", { frames: c.num_frames, seconds: (c.num_frames / 30).toFixed(1), start: c.start + 1, end: c.end + 1 })));
+      appendMergedIds(text, c);
       btn.append(text);
       const mark = el("span", "person-check");
       mark.innerHTML = CHECK_SVG;
@@ -87,6 +101,7 @@ export function initPersonSelect(bus) {
     text.append(name, el("span", "person-meta", how));
     if (candidate) text.append(el("span", "person-meta num",
       m("person.track", { frames: candidate.num_frames, start: candidate.start + 1, end: candidate.end + 1 })));
+    appendMergedIds(text, candidate ?? job.person_track);
     row.append(text);
     list.append(row);
   }

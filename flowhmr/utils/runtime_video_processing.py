@@ -86,6 +86,15 @@ class TrackInfo:
     bboxes: np.ndarray
     length: int = 0
     avg_area: float = 0.0
+    bytetrack_ids: Tuple[int, ...] = ()
+    sam2_object_ids: Tuple[int, ...] = ()
+
+    def __post_init__(self):
+        if not self.bytetrack_ids:
+            self.bytetrack_ids = (int(self.track_id),)
+        else:
+            self.bytetrack_ids = tuple(int(value) for value in self.bytetrack_ids)
+        self.sam2_object_ids = tuple(int(value) for value in (self.sam2_object_ids or ()))
 
 
 @dataclass
@@ -324,8 +333,15 @@ class VideoProcessor:
         end_frame: int | None = None,
         on_progress=None,
         cancel_check=None,
+        sam2_identity_objects=None,
     ) -> TrackingResult:
-        """Detect only the requested frames and keep track times on the original video timeline."""
+        """Detect only the requested frames and keep track times on the original video timeline.
+
+        ``sam2_identity_objects`` optionally supplies SAM2 objects (see
+        ``flowhmr.utils.track_identity.Sam2Object``).  Non-overlapping ByteTrack
+        fragments of one continuously tracked object are then merged into one
+        canonical track while every original ByteTrack ID is preserved.
+        """
         if start_frame < 0 or (end_frame is not None and end_frame < start_frame):
             raise ValueError("人物检测的起止帧无效。")
         tracker = sv.ByteTrack(
@@ -412,7 +428,13 @@ class VideoProcessor:
             total_frames = frame_idx
         print(f">>> bbox detection done: {frame_idx - start_frame} frames "
               f"(source {start_frame + 1}–{last + 1}), {len(tracks)} tracks", flush=True)
-        return TrackingResult(tracks, max(total_frames or 0, frame_idx), width, height, (start_frame, last))
+        result = TrackingResult(tracks, max(total_frames or 0, frame_idx), width, height,
+                                (start_frame, last))
+        if sam2_identity_objects:
+            from flowhmr.utils.track_identity import merge_result_identities
+
+            return merge_result_identities(result, sam2_identity_objects)
+        return result
 
     # Post-processing (all static)
     @staticmethod
@@ -468,7 +490,14 @@ class VideoProcessor:
     @staticmethod
     def save_detected_track(path, result, track_idx, frame_range) -> None:
         bbox, start_end = VideoProcessor.track_bboxes(result, track_idx)
-        np.savez(path, bbox=bbox, start_end=start_end, detection_request=detection_request_key(frame_range))
+        track = result.tracks[track_idx] if track_idx >= 0 else None
+        extra = {}
+        if track is not None:
+            extra["track_id"] = np.asarray(int(track.track_id), dtype=np.int64)
+            extra["bytetrack_ids"] = np.asarray(track.bytetrack_ids, dtype=np.int64)
+            extra["sam2_object_ids"] = np.asarray(track.sam2_object_ids, dtype=np.int64)
+        np.savez(path, bbox=bbox, start_end=start_end,
+                 detection_request=detection_request_key(frame_range), **extra)
 
     @staticmethod
     def smooth_bboxes(bbox_arr: np.ndarray, width: int, height: int) -> np.ndarray:

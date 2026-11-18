@@ -47,6 +47,68 @@ class VideoSourceTest(unittest.TestCase):
                 with client.get(preview, headers={"Range": "bytes=2-"}) as tail:
                     self.assertEqual((tail.status_code, tail.data), (206, converted[2:]))
                     self.assertEqual(tail.headers["Content-Range"], f"bytes 2-{len(converted)-1}/{len(converted)}")
+                annotated = f"{status}/video?source=annotated"
+                self.assertEqual(client.get(annotated).status_code, 404)
+                marked = b"overlay-mask-and-box"
+                (job_dir / 'preview_overlay.mp4').write_bytes(marked)
+                self.assertTrue(client.get(status).json['has_annotated_video'])
+                with client.get(annotated, headers={'Range': 'bytes=3-'}) as response:
+                    self.assertEqual((response.status_code, response.data), (206, marked[3:]))
+                with client.get(preview) as response:
+                    self.assertEqual(response.data, converted)
+                self.assertEqual(canonical.read_bytes(), converted)
+
+
+class PreparedPeopleTest(unittest.TestCase):
+    def test_child_job_inherits_selected_identity_masks_and_body_boxes_without_inference(self):
+        import numpy as np
+        from flowhmr.utils.runtime_video_processing import TrackInfo, TrackingResult
+        from flowhmr.utils.sam2_person_inputs import file_sha256, mask_stream_for_bbox
+        with TemporaryDirectory() as directory:
+            parent_id = '20261111_120000_parent'
+            root = Path(directory, parent_id)
+            sub = root / 'input'
+            cache = sub / 'sam2_inputs'
+            cache.mkdir(parents=True)
+            original = b'clean video only'
+            (root / 'input.mp4').write_bytes(original)
+            canonical = sub / 'input_30fps.mp4'
+            canonical.write_bytes(original)
+            persons = []
+            for oid in (1, 2):
+                masks = np.zeros((6, 8, 10), np.uint8)
+                masks[:, 1:7, oid:oid + 2] = 1
+                np.save(cache / f'masks{oid}.npy', np.packbits(masks.reshape(6, -1), axis=1))
+                np.savez(cache / f'boxes{oid}.npz', frames=np.arange(6), body_boxes=np.tile([0, 0, 10, 8], (6, 1)))
+                persons.append(dict(canonical_id=oid, object_id=oid, bytetrack_ids=[oid, oid + 2],
+                    frame_range=[0, 5], mask_file=f'masks{oid}.npy', boxes_file=f'boxes{oid}.npz'))
+            meta = dict(version=1, run_id='shared-sam2-run', video_sha256=file_sha256(canonical),
+                        image_size=[10, 8], num_frames=6, people=persons)
+            (cache / 'manifest.json').write_text(json.dumps(meta), encoding='utf-8')
+            tracks = [TrackInfo(oid, np.arange(6), np.tile([0, 0, 10, 8], (6, 1)), 6, 80,
+                               (oid, oid + 2), (oid,)) for oid in (1, 2)]
+            result = TrackingResult(tracks, 6, 10, 8, (0, 5))
+            candidates = [dict(index=i, track_index=i, track_id=i + 1, start=0, end=5,
+                num_frames=6, bytetrack_ids=[i + 1, i + 3], sam2_object_ids=[i + 1]) for i in (0, 1)]
+            parent = dict(id=parent_id, filename='two.mp4', ext='.mp4', params=server.DEFAULT_PARAMS.copy(),
+                          status='waiting_user', body_reference='neutral')
+            jobs = {parent_id: parent}
+            members = {}
+            with (patch.object(server, 'ARGS', SimpleNamespace(work_dir=directory)),
+                  patch.object(server, 'JOBS', jobs), patch.object(server, 'MEMBER_DIRS', members),
+                  patch.object(server, 'CANCEL_REQUESTS', set()), patch.object(server, 'enqueue')):
+                server._confirm_people(parent_id, result, candidates, [0, 1], automatic=False)
+                child_id = next(k for k in jobs if k != parent_id)
+                child_dir = Path(server.job_dir(child_id)) / 'input'
+                masks, _ = mask_stream_for_bbox(child_dir / 'sam2_inputs', child_dir / 'input_bbox.npz',
+                                                child_dir / 'input_30fps.mp4')
+                self.assertEqual(jobs[child_id]['person_track']['bytetrack_ids'], [2, 4])
+                self.assertEqual(masks[0].sum(), 12)
+                masks.close()
+                with np.load(child_dir / 'input_bbox.npz') as payload:
+                    self.assertEqual(int(payload['track_id']), 2)
+                    self.assertEqual(str(payload['sam2_input_key']), 'shared-sam2-run')
+                    np.testing.assert_array_equal(payload['start_end'], [0, 5])
 
 
 class CharacterFileTest(unittest.TestCase):

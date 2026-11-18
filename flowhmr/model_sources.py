@@ -25,6 +25,8 @@ HAMER_SOURCE_URL = f"https://codeload.github.com/geopavlakos/hamer/zip/{HAMER_RE
 HAMER_SOURCE_SHA256 = "fba22b57f7a89a0af981ee064b06603a4c527bfd347331a0b369e5e4dcba5194"
 SAM_REPO = "facebook/sam-3d-body-dinov3"
 VGGT_REPO = "facebook/VGGT-Omega"
+# Optional SAM 2.1 person segmentation used by the crossing optimisation.
+SAM2_REPO = "facebook/sam2.1-hiera-small"
 
 # The publishers' ModelScope files match the original model weights byte for byte.
 PERCEPTION_DOWNLOADS = (
@@ -72,6 +74,11 @@ PUBLIC_ASSETS = {
     "sam": _perception_assets[:3],
     "vggt": _perception_assets[3:],
     "joint-regressor": (Asset(files.JOINT_REGRESSOR, 662187, "70e3213bd30fe8d8ce37b54675282745e406f915a51511a003aeff99b6da04cf", (REGRESSOR_URL,)),),
+    # Optional SAM 2.1 checkpoint for the experimental crossing optimisation.
+    "sam2": (Asset(files.SAM2_CROSSING, 184416285,
+                   "6d1aa6f30de5c92224f8172114de081d104bbd23dd9dc5c58996f0cad5dc4d38",
+                   (f"{HF_MIRROR}/{SAM2_REPO}/resolve/main/sam2.1_hiera_small.pt",
+                    f"{HF_OFFICIAL}/{SAM2_REPO}/resolve/main/sam2.1_hiera_small.pt")),),
 }
 
 HAMER_CODE = Asset(".downloads/hamer-source.zip", 2314326, HAMER_SOURCE_SHA256, (HAMER_SOURCE_URL,))

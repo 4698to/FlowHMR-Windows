@@ -134,7 +134,7 @@ export const rerunJob = (id, params) => postJson(`/api/jobs/${id}/rerun`, params
 export const cancelJob = (id) => postJson(`/api/jobs/${id}/cancel`);
 export const prepareScene = (id) => postJson(`/api/jobs/${id}/scene`);
 
-export const videoUrl = (id, converted) => `/api/jobs/${id}/video?source=${converted ? "preview" : "original"}`;
+export const videoUrl = (id, converted, annotated = false) => `/api/jobs/${id}/video?source=${annotated ? "annotated" : converted ? "preview" : "original"}`;
 export const npzUrl = (id) => `/api/jobs/${id}/npz`;
 export const fbxUrl = (id, withSkin, body = "neutral", people = [], firstPose = "none", profile = "flowhmr") => {
   const query = new URLSearchParams({ mesh: withSkin ? "1" : "0", body, first_pose: firstPose });

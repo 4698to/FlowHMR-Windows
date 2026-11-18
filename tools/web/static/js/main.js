@@ -119,6 +119,10 @@ function applyModelInfo(next) {
   $("optTorso").disabled = !torsoReady;
   setText($("torsoHint"), m(torsoReady ? "torso.hint" : "torso.missing"));
   params?.refreshTorso();
+  const crossingReady = !!info?.crossing_available;
+  $("optCrossing").disabled = !crossingReady;
+  setText($("crossingHint"), m(crossingReady ? "crossing.hint" : "crossing.missing"));
+  params?.refreshCrossing();
   params?.setHybridAvailable(!!info?.sam_hybrid_available);
   params?.setCameraOnCpuForAmdIgpu(!!info?.camera_on_cpu_for_amd_igpu);
   if (variantsChanged) viewer.setBodyVariants(info?.body_variants, info?.body_reference);
@@ -352,7 +356,7 @@ async function poll() {
     : job.scene_state === "running" ? "job.scene_aligning"
     : job.loading_models ? "job.model_loading"
     : "job.generating"));
-  preview.showJob(api.videoUrl(id, job.has_preview_video), () => jobLabel(job));
+  preview.showJob(api.videoUrl(id, job.has_preview_video, job.has_annotated_video), () => jobLabel(job));
   person.update(job);
   trim.setSource(job.source_frames);
   trim.setEditable(!ACTIVE.has(job.status));

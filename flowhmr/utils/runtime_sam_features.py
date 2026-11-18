@@ -220,7 +220,7 @@ class Sam3DTokenExtractor:
 
     def extract_frames(self, images, boxes, cameras, *, frame_batch_size=None,
                        use_gpu_preprocess=None, hand_boxes_out=None, hand_boxes_only=False,
-                       merge_hands=True, hand_indices=None) -> Tensor:
+                       merge_hands=True, hand_indices=None, masks=None) -> Tensor:
         """Extract body and both hand tokens without full SAM postprocessing.
 
         Defaults use sixteen video frames per batch and GPU crop preprocessing.
@@ -228,6 +228,8 @@ class Sam3DTokenExtractor:
         ``hand_indices`` (positions inside ``images``) limits the two hand
         decoders to those frames; the other rows get NaN hand slots that
         :func:`fill_hand_slots` interpolates afterwards.
+        ``masks`` (frames, H, W) optionally conditions the body crop on the
+        selected person; smaller masks are upsampled to the frame size.
         ``extract_frame`` continues to return complete SAM visualization data.
         """
         from .lite_sam_infer import extract_tokens
@@ -242,6 +244,12 @@ class Sam3DTokenExtractor:
         gpu_preprocess = self.use_gpu_preprocess if use_gpu_preprocess is None else bool(use_gpu_preprocess)
         if self._xpu_backbone is not None:
             gpu_preprocess = False
+        if masks is not None:
+            masks = np.asarray(masks)
+            if masks.ndim == 4 and masks.shape[-1] == 1:
+                masks = masks[..., 0]
+            if masks.ndim != 3 or masks.shape[0] != len(images):
+                raise ValueError("masks must have shape (frames, H, W) matching the images")
         if hand_indices is not None:
             hand_indices = np.asarray(hand_indices, dtype=np.int64)
             if hand_indices.size and (hand_indices.min() < 0 or hand_indices.max() >= len(images)):
@@ -249,16 +257,29 @@ class Sam3DTokenExtractor:
         self._body_tokens.clear()
         self._hand_tokens.clear()
         tokens = []
+        target_h, target_w = images[0].shape[:2]
         for start in range(0, len(images), batch_size):
             stop = start + batch_size
             local = None
             if hand_indices is not None and not hand_boxes_only:
                 local = hand_indices[(hand_indices >= start) & (hand_indices < stop)] - start
+            batch_masks = None
+            if masks is not None:
+                batch_masks = masks[start:stop]
+                if batch_masks.shape[1:] != (target_h, target_w):
+                    import cv2
+
+                    batch_masks = np.stack([
+                        cv2.resize(frame_mask.astype(np.uint8), (target_w, target_h),
+                                   interpolation=cv2.INTER_NEAREST)
+                        for frame_mask in batch_masks
+                    ])
             tokens.append(extract_tokens(
                 self.estimator, images[start:stop], boxes[start:stop], cameras[start:stop],
                 gpu_preprocess=gpu_preprocess, merge_hands=merge_hands,
                 hand_boxes_out=hand_boxes_out, hand_boxes_only=hand_boxes_only,
                 hand_indices=local, fast_features=self.fast_features, hand_skeleton=self._hand_skeleton,
+                masks=batch_masks,
             ))
         return tokens[0] if len(tokens) == 1 else torch.cat(tokens)
 
@@ -331,6 +352,7 @@ class Sam3DTokenExtractor:
         batch_cb: Optional[Callable[[dict], None]] = None,
         hand_boxes_out: Optional[list] = None,
         _hand_boxes_only: bool = False,
+        masks: Optional[np.ndarray] = None,
     ) -> Tensor:
         if inference_type != "full":
             raise ValueError("extract_video_tokens only supports inference_type='full'")
@@ -344,6 +366,16 @@ class Sam3DTokenExtractor:
             raise ValueError("sam_hand_stride must be 1, 2 or 4")
         if hand_stride > 1 and use_mask:
             raise ValueError("sam_hand_stride > 1 is not supported together with use_mask")
+        if masks is not None:
+            if use_mask:
+                raise ValueError("masks and use_mask are mutually exclusive")
+            from .sam2_person_inputs import PackedMasks
+
+            masks = masks if isinstance(masks, PackedMasks) else np.asarray(masks)
+            if masks.ndim == 4 and masks.shape[-1] == 1:
+                masks = masks[..., 0]
+            if masks.ndim != 3:
+                raise ValueError("masks must have shape (frames, H, W)")
 
         device = torch.device(self.estimator.device)
         total_frames = self._get_total_frames(video_path)
@@ -450,6 +482,14 @@ class Sam3DTokenExtractor:
                             for index, frame in enumerate(frames[:count], first)
                         ])
                     else:
+                        batch_masks = None
+                        if masks is not None:
+                            lo, hi = first - start_frame, stop - start_frame
+                            if lo < 0 or hi > len(masks):
+                                raise ValueError(
+                                    f"masks cover {len(masks)} frames but the SAM pass needs "
+                                    f"frames {first}-{stop - 1} from start {start_frame}")
+                            batch_masks = masks[lo:hi]
                         tokens = self.extract_frames(
                             frames[:count], bbox_xyxy[first:stop], K_all[first:stop],
                             frame_batch_size=count,
@@ -457,6 +497,7 @@ class Sam3DTokenExtractor:
                             hand_boxes_out=hand_boxes, hand_boxes_only=_hand_boxes_only,
                             merge_hands=not low_memory,
                             hand_indices=hand_samples(first, count),
+                            masks=batch_masks,
                         )
                     tokens = tokens if _hand_boxes_only else tokens[:, :token_dim]
                     if output is None:
