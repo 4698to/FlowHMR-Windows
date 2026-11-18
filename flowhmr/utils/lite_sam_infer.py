@@ -26,10 +26,28 @@ def _combine_batches(batches, device):
     }
 
 
+def mask_prompt_score(mask, box, *, min_pixels=64, min_fraction=0.02):
+    """Whether a SAM2 mask carries usable evidence for this crop.
+
+    ``0`` disables the mask prompt for the frame, so the estimator falls back to
+    conditioning on the box alone (the behaviour before mask conditioning
+    existed).  A SAM2 identity that collapses to a handful of pixels during a
+    crossing would otherwise be fed as "target present, no visible body", which
+    corrupts the pose features instead of merely losing detail.
+    """
+    pixels = int(np.count_nonzero(mask))
+    if pixels < min_pixels:
+        return 0.0
+    width = max(float(box[2]) - float(box[0]), 1.0)
+    height = max(float(box[3]) - float(box[1]), 1.0)
+    return 1.0 if pixels >= min_fraction * width * height else 0.0
+
+
 @torch.no_grad()
 def extract_tokens(estimator, images, boxes, cameras, *, gpu_preprocess=False,
                    merge_hands=False, hand_boxes_out=None, hand_boxes_only=False,
-                   hand_indices=None, fast_features=False, hand_skeleton=None):
+                   hand_indices=None, fast_features=False, hand_skeleton=None,
+                   masks=None):
     """Return CPU float32 ``(frames, 3072)`` tokens in body/left/right order.
 
     ``images`` contains RGB uint8 frames, one selected person per frame.
@@ -37,6 +55,12 @@ def extract_tokens(estimator, images, boxes, cameras, *, gpu_preprocess=False,
     operations leading to the tokens. Batching/GPU crops are optional and may
     introduce floating-point differences. Full SAM outputs use the estimator's
     original ``process_one_image`` entry point instead.
+
+    ``masks`` is an optional per-frame binary mask (frames, H, W) for the
+    selected person. When present the body crop is prepared with SAM 3D Body's
+    native mask prompt (the same path as ``process_one_image(masks=...)``).
+    This adds mask conditioning after RGB encoding; it does not erase pixels
+    outside the mask or guarantee exclusion of overlapping people.
 
     ``hand_indices`` runs the two hand decoders only on the listed frames. The
     hand slots of every other row are left as NaN so the caller can linearly
@@ -55,6 +79,17 @@ def extract_tokens(estimator, images, boxes, cameras, *, gpu_preprocess=False,
         if not isinstance(image, np.ndarray) or image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
             raise ValueError("Expected RGB uint8 HWC images")
     frame_count = len(images)
+    if masks is not None:
+        masks = np.asarray(masks)
+        if masks.ndim == 4 and masks.shape[-1] == 1:
+            masks = masks[..., 0]
+        if masks.ndim != 3 or masks.shape[0] != frame_count:
+            raise ValueError("masks must have shape (frames, H, W) matching the batch")
+        if tuple(masks.shape[1:]) != tuple(images[0].shape[:2]):
+            raise ValueError(
+                f"mask size {tuple(masks.shape[1:])} does not match image size "
+                f"{tuple(images[0].shape[:2])}")
+        masks = masks.astype(np.uint8, copy=False)
     if hand_indices is None:
         hand_indices = np.arange(frame_count, dtype=np.int64)
     hand_indices = np.asarray(hand_indices, dtype=np.int64).reshape(-1)
@@ -70,8 +105,9 @@ def extract_tokens(estimator, images, boxes, cameras, *, gpu_preprocess=False,
     device = torch.device(estimator.device)
     model = estimator.model
     body_tokens, hand_tokens = [], []
-    original_single = (len(images) == 1 and not gpu_preprocess and not merge_hands
-                       and hand_boxes_out is None and not hand_boxes_only and not sparse_hands)
+    original_single = (masks is None and len(images) == 1 and not gpu_preprocess
+                       and not merge_hands and hand_boxes_out is None and not hand_boxes_only
+                       and not sparse_hands)
 
     def capture_body(_module, _args, output):
         body_tokens.append(output[0].detach() if original_single else output[0][:, 0].detach().clone())
@@ -105,7 +141,16 @@ def extract_tokens(estimator, images, boxes, cameras, *, gpu_preprocess=False,
             raise RuntimeError(f"Unexpected SAM token shape: {tuple(tokens.shape)}")
         return tokens.to(device="cpu", dtype=torch.float32)
 
-    def prepare(image, box, camera, transform):
+    def prepare(image, box, camera, transform, mask=None, mask_score=1.0):
+        if mask is not None:
+            mask = np.asarray(mask, dtype=np.uint8)
+            if mask.ndim == 2:
+                mask = mask[..., None]
+            # A mask with no usable pixels is an ABSENT target, not an
+            # all-background prompt, so the estimator conditions on the box only.
+            return prepare_batch(image, transform, box[None], masks=mask[None],
+                                 masks_score=np.asarray([mask_score], dtype=np.float32),
+                                 cam_int=camera[None])
         if gpu_preprocess:
             from .sam_gpu_preprocess import prepare_gpu_batch
             return prepare_gpu_batch(image, box[None], camera[None], transform)
@@ -140,10 +185,20 @@ def extract_tokens(estimator, images, boxes, cameras, *, gpu_preprocess=False,
                 return collected_tokens()
             frames = ([torch.as_tensor(np.ascontiguousarray(img), device=device) for img in images]
                       if gpu_preprocess else images)
-            body_batch = _combine_batches([
-                prepare(image, box, camera, estimator.transform)
-                for image, box, camera in zip(frames, boxes, cameras)
-            ], device)
+            if masks is None:
+                body_batch = _combine_batches([
+                    prepare(image, box, camera, estimator.transform)
+                    for image, box, camera in zip(frames, boxes, cameras)
+                ], device)
+            else:
+                # Mask prompts need the original CPU transform (SAM's public
+                # prepare_batch); hand crops keep the faster GPU preprocessing.
+                mask_scores = [mask_prompt_score(masks[index], boxes[index]) for index in range(len(images))]
+                body_batch = _combine_batches([
+                    prepare(images[index], boxes[index], cameras[index], estimator.transform,
+                            mask=masks[index], mask_score=mask_scores[index])
+                    for index in range(len(images))
+                ], device)
             model._initialize_batch(body_batch)
             body = model.forward_step(body_batch, decoder_type="body")
             # Upstream _get_hand_box indexes affine_trans[0, person]. Expose the

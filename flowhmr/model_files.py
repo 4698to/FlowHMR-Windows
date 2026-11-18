@@ -32,8 +32,12 @@ SMPLH_FILES = {
 SMPLH_REFERENCE_ORDER = ("neutral", "male", "female")
 JOINT_REGRESSOR = "body_models/smpl_neutral_J_regressor.pt"
 HAMER_FILES = ("hamer/hamer.ckpt", "hamer/model_config.yaml", "hamer/mano_mean_params.npz")
+# Optional SAM 2.1 checkpoint used by the experimental crossing optimisation.
+SAM2_CROSSING = "sam2/sam2.1_hiera_small.pt"
+SAM2_CROSSING_FILES = (SAM2_CROSSING,)
 MODEL_DESTINATIONS = (FLOWHMR_CKPT, FLOWHMR_CONFIG, *FLOWHMR_BASE_FILES, YOLOX, *SAM3D_FILES, VGGT,
-                      *SMPLH_FILES.values(), JOINT_REGRESSOR, *MANO_FILES, *HAMER_FILES)
+                      *SMPLH_FILES.values(), JOINT_REGRESSOR, *MANO_FILES, *HAMER_FILES,
+                      *SAM2_CROSSING_FILES)
 
 
 def ensure_model_folders():
@@ -120,6 +124,15 @@ def flowhmr_base_paths():
 
 def torso_optimization_available():
     return all(file_present(resolve_model(relative)) for relative in FLOWHMR_BASE_FILES)
+
+
+def sam2_crossing_paths():
+    """Optional SAM 2.1 checkpoint used by the crossing optimisation."""
+    return tuple(map(resolve_model, SAM2_CROSSING_FILES))
+
+
+def crossing_optimization_available():
+    return all(file_present(resolve_model(relative)) for relative in SAM2_CROSSING_FILES)
 
 
 def core_model_paths(ckpt=None, config=None, *, body_reference=None):

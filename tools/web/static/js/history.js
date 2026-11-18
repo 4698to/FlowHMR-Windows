@@ -93,6 +93,9 @@ export function initHistory({ onOpen, onRerun, onDeleted, onUpdated }) {
         t(job.params.correction_preset === "strong" ? "correction.lock_strong" : "correction.lock_normal"),
         t(job.params.correction_floor_m == null ? "correction.floor_auto" : "correction.floor_manual"),
       ] : []),
+      ...(job.params.crossing_opt ? [
+        t(job.crossing_opt_used === false ? "crossing.fallback" : "crossing.active"),
+      ] : []),
       `CFG ${job.params.cfg_scale}`, t("history.step_count", { count: job.params.steps }),
     ].join(" · ");
     setText(sub, summary);

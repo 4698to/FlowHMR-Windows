@@ -53,8 +53,8 @@ from flowhmr.utils.runtime_preview_thumbnail import ensure_thumbnail
 from flowhmr.core.bodymodels.body_variants import available_variants, model_path, write_preview_vertices
 from flowhmr.model_files import (
     FLOWHMR_BASE_FILES, HAMER_FILES, MODEL_ROOT, SAM3D_FILES, VGGT, SMPLH_FILES, core_model_paths,
-    ensure_model_folders, flowhmr_base_paths, flowhmr_paths, missing_model_paths, resolve_model,
-    smplh_reference, torso_optimization_available,
+    crossing_optimization_available, ensure_model_folders, flowhmr_base_paths, flowhmr_paths, missing_model_paths,
+    resolve_model, smplh_reference, torso_optimization_available,
 )
 from flowhmr import model_integrity
 from flowhmr.character_files import CharacterFiles, KEY_ENV as CHARACTER_KEY_ENV, MAX_MODEL_BYTES
@@ -398,7 +398,7 @@ DEFAULT_PARAMS = {
     "correction_floor_m": None, "correction_preset": "strong",
     "sole_fit": True, "sole_fit_strength": SOLE_FIT_REFERENCE_STRENGTH,
     "smoothing_frames": 0.12, "hamer": False, "hamer_stride": 1,  # 0.04 on the 0–1 slider
-    "torso_opt": False,
+    "torso_opt": False, "crossing_opt": False,
 }
 
 
@@ -517,6 +517,7 @@ def parse_params(src, base=None):
         "manual_select": _to_bool(src.get("manual_select"), base.get("manual_select", True)),
         "static_camera": _to_bool(src.get("static_camera"), base["static_camera"] and vggt_interval == 0),
         "torso_opt": _to_bool(src.get("torso_opt"), base["torso_opt"]),
+        "crossing_opt": _to_bool(src.get("crossing_opt"), base["crossing_opt"]),
     }
 
 
@@ -831,8 +832,11 @@ def _copy_person_thumbnail(directory, destination, person):
 
 
 def _selected_track(candidate, *, automatic=False):
+    bytetrack_ids = candidate.get("bytetrack_ids") or [candidate["track_id"]]
     return {"selected_person": candidate["index"], "selection_auto": automatic,
-            "person_track": {key: candidate[key] for key in ("track_id", "num_frames", "start", "end")}}
+            "person_track": {key: candidate[key] for key in ("track_id", "num_frames", "start", "end")}
+                            | {"bytetrack_ids": list(bytetrack_ids),
+                               "sam2_object_ids": list(candidate.get("sam2_object_ids") or [])}}
 
 
 def _confirm_people(job_id, result, candidates, people, *, automatic):
@@ -877,8 +881,18 @@ def _confirm_people(job_id, result, candidates, people, *, automatic):
             _link_video(os.path.join(directory, video), os.path.join(child_stage, video))
             _link_video(os.path.join(directory, canonical), os.path.join(child_stage, canonical))
             _copy_person_thumbnail(directory, child_stage, i)
-            VideoProcessor.save_detected_track(os.path.join(sub_dir, f"{SUB}_bbox.npz"), result,
-                                                candidate["track_index"], job_detection_range(params))
+            prepared_source = os.path.join(directory, SUB, "sam2_inputs")
+            if os.path.isfile(os.path.join(prepared_source, "manifest.json")):
+                from flowhmr.utils.sam2_person_inputs import save_prepared_track
+
+                shutil.copytree(prepared_source, os.path.join(sub_dir, "sam2_inputs"))
+                with open(os.path.join(prepared_source, "manifest.json"), encoding="utf-8") as stream:
+                    prepared_meta = json.load(stream)
+                save_prepared_track(os.path.join(sub_dir, f"{SUB}_bbox.npz"), result,
+                                    candidate["track_index"], job_detection_range(params), prepared_meta)
+            else:
+                VideoProcessor.save_detected_track(os.path.join(sub_dir, f"{SUB}_bbox.npz"), result,
+                                                    candidate["track_index"], job_detection_range(params))
             _write_job(child, child_stage)
             children.append((child, child_stage))
 
@@ -1052,7 +1066,8 @@ def run_torso_optimization(job_id, engine, params, sub_dir, result, standard_mot
             sam_chunk_size=params.get("sam_chunk_size", DEFAULT_PARAMS["sam_chunk_size"]),
             sam_hand_stride=params["sam_hand_stride"],
             person_selector=None, progress_callback=None,
-            cancel_check=lambda: _raise_if_cancelled(job_id))
+            cancel_check=lambda: _raise_if_cancelled(job_id),
+            prepared_inputs=bool(params.get("crossing_opt")))
         _raise_if_cancelled(job_id)
         if not os.path.exists(base_result + ".npz"):
             raise FileNotFoundError(f"torso base output missing: {base_result}.npz")
@@ -1082,6 +1097,77 @@ def run_torso_optimization(job_id, engine, params, sub_dir, result, standard_mot
     return metrics
 
 
+def _crossing_inputs_ready(directory, video_path):
+    """True when a prepared crossing cache matches this job's working video."""
+    if not os.path.isfile(os.path.join(directory, "manifest.json")):
+        return False
+    try:
+        from flowhmr.utils.sam2_person_inputs import load_person_inputs
+        from flowhmr.utils.sam2_body_boxes import BODY_POLICY_VERSION
+
+        prepared, streams, meta = load_person_inputs(directory, video_path)
+        for stream in streams.values():
+            stream.close()
+        # Caches written by earlier hand-run experiments are not trusted here.
+        if meta.get("producer") != "gui_crossing_v1":
+            shutil.rmtree(directory, ignore_errors=True)
+            return False
+        # A cache built with a different crop policy must be rebuilt, not reused.
+        if meta.get("body_policy", {}).get("version") != BODY_POLICY_VERSION:
+            shutil.rmtree(directory, ignore_errors=True)
+            return False
+        return bool(prepared.tracks)
+    except Exception:  # noqa: BLE001 - stale or foreign cache is rebuilt
+        shutil.rmtree(directory, ignore_errors=True)
+        return False
+
+
+def _run_crossing_optimization(job_id, engine, on_progress):
+    """Experimental: prepare SAM2 masks, causal body boxes and merged identities.
+
+    The result is written next to the working video, where ``process_video``
+    already knows how to consume prepared person inputs.  Any failure falls back
+    to the standard ByteTrack flow so the toggle can never block a job.
+    """
+    from flowhmr.pipeline.v2m_inference import StageName
+    from flowhmr.utils.sam2_crossing_inputs import prepare_crossing_inputs
+
+    sub_dir = os.path.join(job_dir(job_id), SUB)
+    target = os.path.join(sub_dir, "sam2_inputs")
+    if str(engine.device).split(":", 1)[0] != "cuda":
+        update_job(job_id, crossing_opt_used=False,
+                   crossing_opt_reason="人物交叉优化需要 GPU 推理环境，已回退默认流程")
+        return False
+    try:
+        os.makedirs(sub_dir, exist_ok=True)
+        import torch
+
+        # Park staged models so detector + SAM2 fit beside them on smaller GPUs.
+        engine.release_stage()
+        if torch.cuda.is_initialized():
+            torch.cuda.empty_cache()
+        canonical = engine.proc.transcode(input_video(job_id), backup_dir=sub_dir)
+        # Batch children and reruns already carry a prepared cache in their job folder.
+        if _crossing_inputs_ready(target, canonical):
+            update_job(job_id, crossing_opt_used=True, crossing_opt_reason="cached")
+            return True
+        summary = prepare_crossing_inputs(
+            engine.proc, canonical, target, device=str(engine.device),
+            progress=lambda fraction, message: on_progress(
+                StageName.DETECTION, 5 + int(fraction * 53), message),
+            cancel_check=lambda: _raise_if_cancelled(job_id))
+    except JobCancelled:
+        raise
+    except Exception as error:  # noqa: BLE001 - fall back, never fail the job
+        shutil.rmtree(target, ignore_errors=True)
+        print(f"[crossing] fallback after {type(error).__name__}: {error}", flush=True)
+        traceback.print_exc()
+        update_job(job_id, crossing_opt_used=False, crossing_opt_reason=str(error))
+        return False
+    update_job(job_id, crossing_opt_used=True, crossing_opt_summary=summary)
+    return True
+
+
 def run_job(job_id):
     _raise_if_cancelled(job_id)
     with JOBS_LOCK:
@@ -1098,6 +1184,9 @@ def run_job(job_id):
         if params.get("torso_opt") and not torso_optimization_available():
             raise UserMessage("请先在右上角「模型」下载可选的 FlowHMR 躯干模型（base），再开启躯干动作优化。",
                               "torso_model_missing")
+        if params.get("crossing_opt") and not crossing_optimization_available():
+            raise UserMessage("请先在右上角「模型」下载可选的 SAM 2.1 人物分割模型，再开启人物交叉优化。",
+                              "crossing_model_missing")
         loading_models = (ENGINE is None or ENGINE.body_reference != (requested_reference or smplh_reference())
                           or ENGINE.sam_backend != sam_backend)
         job.update(status="running", loading_models=loading_models, started=time.time(),
@@ -1182,6 +1271,11 @@ def run_job(job_id):
         engine.postprocess = get_postprocess(
             params["correction_floor_m"], params["correction_preset"], sole_fit_strength=params["sole_fit_strength"],
         )
+    if params.get("crossing_opt"):
+        _raise_if_cancelled(job_id)
+        update_job(job_id, message="人物交叉优化：准备 SAM2 分割与身份")
+        _run_crossing_optimization(job_id, engine, on_progress)
+        _raise_if_cancelled(job_id)
     sub_dir = engine.process_video(
         input_video(job_id), job_dir(job_id), seed=params["seed"], cfg_scale=params["cfg_scale"],
         max_frames=None if params["auto_frames"] else params["max_frames"],
@@ -1197,6 +1291,7 @@ def run_job(job_id):
         progress_callback=on_progress,
         cancel_check=lambda: _raise_if_cancelled(job_id),
         details_callback=lambda details: update_job(job_id, **details),
+        prepared_inputs=bool(params.get("crossing_opt")),
     )
     _raise_if_cancelled(job_id)
     final_suffix = "" if params["postprocess"] or params["hamer"] else "_origin"
@@ -1809,6 +1904,7 @@ def api_info():
         "postprocess_available": native_correction_available(),
         "hamer_available": any(item["id"] == "hamer" and item["status"] == "ready" for item in inventory["items"]),
         "torso_available": torso_optimization_available(),
+        "crossing_available": crossing_optimization_available(),
         "body_variants": available_variants(),
         "body_reference": smplh_reference(),
         "sam_manual_default": getattr(ARGS, "sam_chunk_default", 16),
@@ -2043,6 +2139,11 @@ def api_rerun(job_id):
                     _link_video(path, os.path.join(dst_sub, name))
                 else:
                     shutil.copy2(path, dst_sub)
+        # The crossing cache only depends on the working video, not on detection
+        # settings, and it is re-validated against that video before reuse.
+        if params.get("crossing_opt") and os.path.isdir(os.path.join(src_sub, "sam2_inputs")):
+            shutil.copytree(os.path.join(src_sub, "sam2_inputs"),
+                            os.path.join(dst_sub, "sam2_inputs"), dirs_exist_ok=True)
         person = src.get("selected_person")
         if person is not None and not reselect and os.path.isfile(os.path.join(dst_sub, f"{SUB}_bbox.npz")):
             _copy_person_thumbnail(job_dir(job_id), job_dir(job["id"]), person)
@@ -2133,6 +2234,7 @@ def api_job(job_id):
         job["has_fbx"] = job["has_vmd"] and fbx_export_available(job_body_reference(job))
     canonical = os.path.join(job_dir(job_id), SUB, f"{SUB}_30fps.mp4")
     job["has_preview_video"] = os.path.isfile(canonical)
+    job["has_annotated_video"] = os.path.isfile(os.path.join(job_dir(job_id), "preview_overlay.mp4"))
     if not job.get("source_frames") and job["status"] in ("done", "cancelled", "failed"):
         if job["has_preview_video"]:
             import cv2
@@ -2192,7 +2294,7 @@ def api_jobs():
 
     keys = ("id", "filename", "status", "progress", "created", "finished", "num_frames", "params", "recovered", "source", "selection_policy",
             "selected_person", "person_count", "person_done", "message", "loading_models", "scene_state", "source_frames", "stages",
-            "sam_batch", "camera")
+            "sam_batch", "camera", "crossing_opt_used", "crossing_opt_reason")
     with JOBS_LOCK:
         groups = defaultdict(list)
         for row in JOBS.values():
@@ -2837,8 +2939,13 @@ def api_result(job_id, kind):
         # Chromium may request the remainder of a partially buffered file by byte
         # range. Never switch the file behind a URL the player is still using.
         version = request.args.get("source")
-        if version not in (None, "original", "preview"):
+        if version not in (None, "original", "preview", "annotated"):
             abort(400)
+        if version == "annotated":
+            path = os.path.join(job_dir(job_id), "preview_overlay.mp4")
+            if not os.path.isfile(path):
+                abort(404)
+            return send_file(path, conditional=True)
         canonical = os.path.join(job_dir(job_id), SUB, f"{SUB}_30fps.mp4")
         has_preview = os.path.isfile(canonical)
         if version == "preview" and not has_preview:

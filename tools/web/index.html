@@ -171,6 +171,13 @@
         </div>
         <button type="button" class="toggle" id="optManual" role="switch" aria-label="手动选人" aria-checked="true" data-i18n-label="person.manual"><span class="toggle-knob"></span></button>
       </div>
+      <div class="setting-row person-setting" title="用 SAM2.1 分割人物、在遮挡时保持身体尺度，并合并被切断的跟踪身份。适合多人交叉、互相遮挡的素材；会增加一次分割的耗时。仅作实验用途。" data-i18n-title="crossing.tooltip">
+        <div>
+          <div class="setting-label" data-i18n="crossing.title">人物交叉优化（实验性）</div>
+          <div class="setting-help" id="crossingHint" data-i18n="crossing.hint">优化有人物在画面中交叉时的效果</div>
+        </div>
+        <button type="button" class="toggle" id="optCrossing" role="switch" aria-label="人物交叉优化（实验性）" aria-checked="false" aria-describedby="crossingHint" data-i18n-label="crossing.title"><span class="toggle-knob"></span></button>
+      </div>
       <p class="setting-help" id="rangeSummary"></p>
       <button type="button" class="btn-primary block run-btn" id="btnSubmit" disabled data-i18n="settings.generate">生成 3D 动作</button>
       <div class="generation-options">
