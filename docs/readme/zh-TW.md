@@ -6,16 +6,17 @@
 
 **[下載 Windows 可攜版](https://github.com/xiaoerofficial021-collab/FlowHMR-Windows/releases/latest/download/FlowHMR-Windows.zip)** · [查看發行說明](https://github.com/xiaoerofficial021-collab/FlowHMR-Windows/releases/latest) · [FlowHMR 論文](https://arxiv.org/abs/2610.03691)
 
-## v0.3.7 更新
+## v0.3.8 更新
 
 - **可攜版更新。** 開啟上方的「檢查更新」，查看說明並下載安裝。也可手動匯入官方可攜 ZIP。
+- **本次修正。** 運動機位下的單人跨鏡接續在同一鏡頭內補上偵測框，並在剪接點對齊人物朝向。攝影機反求會重用生成階段的逐鏡機位與人物觀測資料。
 - **攝影機反求（實驗性）。** 動作完成後，可生成、預覽和重算原片機位，也可匯出與動作配對的 FBX、VMD 或 NPZ。可根據原片估計推拉與焦距，並用 GeoCalib 改善地面傾角。
 - **人物片段接續與場景對齊（實驗性）。** 可將同一人的鏡頭接到一條時間軸，也可依序確認多個人物並對齊到同一場景。腕肘過渡限於原片能提供姿態依據的切點附近。
 - **軀幹動作最佳化。** 預設關閉。開啟後會額外執行一次 FlowHMR base，重新估計骨盆、脊椎、頸部和頭部的轉動，並以標準動作的腳部位置與朝向為目標。
 - **模型按需下載。** SAM 2.1（人物交叉最佳化，實驗性）、FlowHMR base 和 GeoCalib 都可在「模型」面板逐項下載。
 - **遠景預覽與 MCP。** 改善部分角色拉遠後的蒙皮閃爍。MCP 可生成、查詢和停止攝影機反求，並匯出配對的動作與攝影機。
 
-[完整更新說明](../release-windows.md) · [上一版 v0.3.6](../release-windows-v0.3.6.md)
+[完整更新說明](../release-windows.md) · [上一版 v0.3.7](../release-windows-v0.3.7.md)
 
 ## 最低配置與支援裝置
 

@@ -82,6 +82,22 @@ def array_digest(value):
     return hashlib.sha256(str((a.shape, a.dtype.str)).encode() + a.tobytes()).hexdigest()
 
 
+def bind_linked_camera_inputs(directory, first, count):
+    """Bind the shared generation observations to the delivered motion."""
+    root = Path(directory)
+    packet = root / 'input/linked/camera_inputs.npz'
+    metadata = packet.with_suffix('.json')
+    meta = json.loads(metadata.read_text(encoding='utf8'))
+    if meta['sha256'] != file_revision_digest(packet):
+        raise ValueError('共用相机输入校验失败。')
+    with np.load(packet, allow_pickle=False) as inputs, np.load(root/'motion.npz', allow_pickle=False) as motion:
+        if (int(inputs['track_start']) != first or len(inputs['RT']) != count
+                or not np.array_equal(inputs['valid'], validity(motion.get('valid_frames'), count))):
+            raise ValueError('共用相机输入与最终动作时间线不一致。')
+    meta['motion_sha256'] = file_revision_digest(root/'motion.npz')
+    save_json(metadata, meta)
+
+
 def _serialize_json(value):
     def scalar(value):
         if isinstance(value, np.generic):
@@ -422,6 +438,16 @@ def build_camera(directory, job, inspection, acquire_sam, device, *, check=lambd
             support, support_source = _observation_support(job, first, len(joints), z.get('observed_frames'))
         shots = meta['shots']
         source = dict(raw_camera='linked_shot_cache', observations_reused=True, generation_calls=0)
+        if 'video_sha256' in meta:
+            if meta['video_sha256'] != file_revision_digest(video):
+                raise ValueError('共用相机输入与当前原片不一致，请重跑任务。')
+            from .shot_detection import camera_shots
+
+            notify('已复用生成阶段的机位与人物观测', 45)
+            _, shot_images = camera_shots(video, first, len(joints), check)
+            boxes = _saved_boxes(directory, first, len(joints))
+            if support is not None and not support.all():
+                continuity = _short_camera_continuity(video, first, valid, support, check)
     elif archive.exists() and meta_path.exists():
         meta = json.loads(meta_path.read_text(encoding='utf8'))
         if meta['motion_sha256'] != motion_hash or meta['sha256'] != digest(archive):

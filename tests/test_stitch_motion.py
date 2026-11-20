@@ -1,8 +1,13 @@
 import unittest
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
-from flowhmr.multishot.stitch_motion import SEAM_FRAMES, fragment_inputs, stitch_fragments
+from flowhmr.multishot.motion_condition import joined_motion_camera
+from flowhmr.multishot.stitch_motion import (
+    SEAM_FRAMES, _boxes_for_shot_timeline, _continuous_generation_parts, _include_verified_edge_frames,
+    fragment_inputs, stitch_fragments,
+)
 
 
 def motion(length, angle, x):
@@ -14,6 +19,48 @@ def motion(length, angle, x):
 
 
 class FragmentStitchTest(unittest.TestCase):
+    def test_cut_uses_heading_at_same_time_on_both_sides(self):
+        rt = np.broadcast_to(np.eye(4), (24,4,4)).copy()
+        ahead = np.arange(24)*.06
+        ahead[12:] += .7
+        orientation = Rotation.from_rotvec(ahead[:,None]*[0,1,0]).as_matrix()
+        valid = np.ones(24,bool)
+        shots = [dict(start=0,end=12), dict(start=12,end=24)]
+        conditioned = joined_motion_camera(rt, orientation, valid, valid, shots, fit_cut_velocity=True)
+        np.testing.assert_allclose(conditioned[12,:3,:3],
+                                   Rotation.from_rotvec([0,.7,0]).as_matrix(), atol=1e-12)
+        np.testing.assert_array_equal(conditioned[:12], rt[:12])
+
+    def test_missing_box_at_cut_uses_the_incoming_shot(self):
+        boxes = np.array([[0,0,10,20], [0,0,10,20], [40,0,60,20], [80,0,110,20], [82,0,112,20]], np.float32)
+        revised, supported = _boxes_for_shot_timeline(10, boxes, np.array([10,11,13,14]), [(10,12), (12,15)])
+        np.testing.assert_array_equal(revised[2], boxes[3])
+        np.testing.assert_array_equal(revised[[0,1,3,4]], boxes[[0,1,3,4]])
+        self.assertTrue(supported.all())
+
+    def test_shared_generation_requires_contiguous_frames_and_two_observed_arms(self):
+        parts = [(a, b, owner, np.arange(a, b+1), np.full((b-a+1, 4), owner, np.float32))
+                 for a, b, owner in ((0, 19, 1), (20, 39, 2), (41, 59, 3))]
+        self.assertEqual(len(_continuous_generation_parts(parts, {20: (0,), 41: (0, 1)}, 100)), 3)
+        self.assertEqual(len(_continuous_generation_parts(parts, {20: (0, 1)}, 39)), 3)
+        joined = _continuous_generation_parts(parts, {20: (0, 1), 41: (0, 1)}, 100)
+        self.assertEqual([part[:3] for part in joined], [(0, 39, 1), (41, 59, 3)])
+        np.testing.assert_array_equal(joined[0][3], np.arange(40))
+        np.testing.assert_array_equal(joined[0][4][:, 0], np.repeat([1, 2], 20))
+
+    def test_verified_boundary_reuses_box_without_changing_detector_evidence(self):
+        left_boxes = np.arange(12, dtype=np.float32).reshape(3, 4)
+        right_boxes = left_boxes + 20
+        left_seen, right_seen = np.arange(10, 13), np.arange(15, 18)
+        parts = [(10, 12, 1, left_seen, left_boxes), (15, 17, 2, right_seen, right_boxes)]
+        left, right = _include_verified_edge_frames(parts, {13: 12, 14: 15, 18: 17, 20: 17})
+        self.assertEqual(left[:3], (10, 13, 1))
+        self.assertEqual(right[:3], (14, 18, 2))
+        np.testing.assert_array_equal(left[3], left_seen)
+        np.testing.assert_array_equal(right[3], right_seen)
+        np.testing.assert_array_equal(left[4][-1], left_boxes[-1])
+        np.testing.assert_array_equal(right[4][[0, -1]], right_boxes[[0, -1]])
+
     def test_only_handoff_changes_local_body_motion(self):
         left = motion(22, .2, 1.)
         right = motion(19, .55, 5.)

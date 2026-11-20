@@ -1114,7 +1114,8 @@ class V2MInferenceEngine:
                       sam2_mask_payload: dict | None = None,
                       sam2_identity_objects=None,
                       prepared_inputs: bool | None = None,
-                      prepared_inputs_dir: Path | None = None) -> str:
+                      prepared_inputs_dir: Path | None = None,
+                      shared_camera: dict | None = None) -> str:
         """Video -> SMPL-H motion.
 
         static_camera: skip VGGT and use a fixed pose with default intrinsics.
@@ -1124,6 +1125,7 @@ class V2MInferenceEngine:
         hand slots; 1 decodes every frame.
         hamer: refine the selected person's fingers before exporting the motion.
         hamer_stride: interval in video frames between hand predictions; fill gaps with rotation interpolation.
+        shared_camera: reuse the parent task's shot-aligned camera inputs for a selected fragment.
 
         person_selector: optional ``f(result, candidates, default) -> candidate index``,
         called after tracking when more than one person track (>= 15 frames) is found, e.g.
@@ -1394,6 +1396,8 @@ class V2MInferenceEngine:
             report = generate_fragments(self, video_path, working_video, sub_dir, video_name, parts, s, e,
                 options=options, prepared_dir=prepared_dir if prepared is not None else None,
                 prepared_key=prepared[2]['run_id'] if prepared is not None else None, cuts=cuts,
+                shots=shots, image_size_hw=(video_meta.height, video_meta.width),
+                camera_progress=lambda message, progress: _pcb(StageName.CAMERA, progress, message),
                 notify=lambda index, count: _pcb(StageName.GENERATION, (index-1)*90/count,
                                                  f"正在独立生成片段 {index}/{count}"))
             observed, usable = observed_motion_frames(detected_frames, s, e-s+1)
@@ -1416,14 +1420,20 @@ class V2MInferenceEngine:
 
         from flowhmr.multishot.motion_condition import observed_motion_frames, track_shots
 
+        if shared_camera is not None:
+            if (shared_camera['frame_range'] != (s, e)
+                    or shared_camera['RT'].shape != (t_track, 4, 4)
+                    or shared_camera['K'].shape != (t_track, 3, 3)
+                    or shared_camera['pose_support'].shape != (t_track,)):
+                raise ValueError('片段范围与共用相机输入不一致。')
+            shot_ranges = shared_camera['shot_ranges']
         shots = track_shots(shot_ranges, s, e)
         can_observe = getattr(self.sam_extractor, "estimator", None) is not None
         edited_track = len(shots) > 1 and can_observe
-        record_observations = edited_track
-        if edited_track:
+        record_observations = edited_track or shared_camera is not None
+        if record_observations:
             tracked = np.arange(s, e + 1) if detected_frames is None else detected_frames
             observed, usable = observed_motion_frames(tracked, s, t_track)
-        if record_observations:
             from flowhmr.multishot.runtime import save_npz
         long_motion_frames = t_track if t_track > LONG_MOTION_EXPERIMENTAL_THRESHOLD else None
         _details(track_range=[s, e], long_motion_frames=long_motion_frames)
@@ -1436,17 +1446,19 @@ class V2MInferenceEngine:
         )
 
         camera_stamp = os.stat(camera_npz_path).st_mtime_ns if os.path.exists(camera_npz_path) else None
-        if edited_track:
-            from flowhmr.multishot.runtime import estimate_shot_cameras
-            from flowhmr.multishot.timeline import intervals
-
+        if edited_track or shared_camera is not None:
             hw = (video_meta.height, video_meta.width)
-            camera_options = {"params": {"static_camera": static_camera, "vggt_interval": vggt_frame_interval}}
-            raw_rt, K, _ = estimate_shot_cameras(
-                Path(output_dir), camera_options, shots, s, t_track, hw, working_video, self.device,
-                cancel_check or (lambda: None), lambda msg, pct: _pcb(StageName.CAMERA, pct * 4, msg),
-                self._release_camera_cuda,
-            )
+            if shared_camera is not None:
+                raw_rt, K = shared_camera['RT'], shared_camera['K']
+            else:
+                from flowhmr.multishot.runtime import estimate_shot_cameras
+
+                camera_options = {"params": {"static_camera": static_camera, "vggt_interval": vggt_frame_interval}}
+                raw_rt, K, _ = estimate_shot_cameras(
+                    Path(output_dir), camera_options, shots, s, t_track, hw, working_video, self.device,
+                    cancel_check or (lambda: None), lambda msg, pct: _pcb(StageName.CAMERA, pct * 4, msg),
+                    self._release_camera_cuda,
+                )
             camera_result = VGGTCameraResult(raw_rt, raw_rt, K, hw)
             same = False
             if camera_stamp is not None:
@@ -1460,11 +1472,14 @@ class V2MInferenceEngine:
             if not same:
                 save_npz(camera_npz_path, camera_RT=raw_rt, RT=raw_rt, K=K, image_size_hw=np.array(hw),
                          frame_range=np.array([s,e]), shot_ranges=shot_ranges, k_space="original_frame")
-            _details(shot_linking_report=dict(
-                tracks=[{**row, "start":s+row["start"], "end":s+row["end"]} for row in shots],
-                direct_pose_frames=int(observed.sum()),
-                unobserved_source_ranges=[[s+a,s+b] for a,b in intervals(~usable)],
-            ))
+            if edited_track:
+                from flowhmr.multishot.timeline import intervals
+
+                _details(shot_linking_report=dict(
+                    tracks=[{**row, "start":s+row["start"], "end":s+row["end"]} for row in shots],
+                    direct_pose_frames=int(observed.sum()),
+                    unobserved_source_ranges=[[s+a,s+b] for a,b in intervals(~usable)],
+                ))
         elif static_camera:
             camera_result = make_static_camera(
                 (video_meta.height, video_meta.width), frame_range=(s, e), output_npz=camera_npz_path,
@@ -1537,14 +1552,17 @@ class V2MInferenceEngine:
                 feature_cached = False
         if feature_cached and record_observations:
             try:
+                with np.load(bbox_npz_path, allow_pickle=False) as selected:
+                    selected_boxes = selected["bbox"]
                 with np.load(observations_path, allow_pickle=False) as saved:
                     orientation = saved["orientation"]
                     points = saved["points"]
                     if (orientation.shape == (t_track,3,3) and np.isfinite(orientation[observed]).all()
                             and points.shape == (t_track,70,3)
+                            and np.isfinite(points[observed]).all()
                             and np.array_equal(saved["K"], camera_result.K)
                             and np.array_equal(saved["source_frames"], np.arange(s, e + 1))
-                            and "boxes" in saved):
+                            and np.array_equal(saved.get("boxes"), selected_boxes)):
                         body_observations = orientation
             except (OSError, ValueError, KeyError):
                 pass
@@ -1730,7 +1748,9 @@ class V2MInferenceEngine:
             fill_hidden_features(sam_tokens, usable)
         if edited_track:
             from flowhmr.multishot.motion_condition import joined_motion_camera
-            conditioning_camera = joined_motion_camera(conditioning_camera, body_observations, observed, usable, shots)
+            support = shared_camera["pose_support"] if shared_camera is not None else observed
+            conditioning_camera = joined_motion_camera(conditioning_camera, body_observations, support, usable, shots,
+                                                       fit_cut_velocity=shared_camera is not None)
         camera_RT = _vggt_opencv_to_yup_rt(torch.from_numpy(conditioning_camera).to(torch.float32))
         feature_dict = build_feature_dict(sam_tokens, camera_RT, self.device)
 

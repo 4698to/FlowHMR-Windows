@@ -38,10 +38,17 @@ def _level(up):
     return np.stack([np.cross(up, forward), up, forward], axis=1)
 
 
-def joined_motion_camera(rt, body_orientation, observed, usable, shots):
+def _heading_at_cut(headings, frames, cut):
+    if len(headings) == 1:
+        return headings[0]
+    times = frames - cut
+    return np.linalg.lstsq(np.column_stack((times, np.ones(len(times)))), headings, rcond=None)[0][1]
+
+
+def joined_motion_camera(rt, body_orientation, observed, usable, shots, *, fit_cut_velocity=False):
     """Use the observed actor's heading to place each shot in the same world."""
     out = rt.copy()
-    previous_heading = None
+    previous = None
     for shot in shots:
         a,b = shot['start'], shot['end']
         direct = observed[a:b] & np.isfinite(body_orientation[a:b]).all((1,2))
@@ -50,16 +57,27 @@ def joined_motion_camera(rt, body_orientation, observed, usable, shots):
         raw = Rotation.from_matrix(rt[a:b,:3,:3]).as_matrix()
         relative = raw @ raw[0].T
         headings = relative[direct].transpose(0,2,1) @ body_orientation[a:b][direct]
-        up = np.median(headings[:,:,1], axis=0)
+        up = (np.mean if fit_cut_velocity else np.median)(headings[:,:,1], axis=0)
         if np.linalg.norm(up) < .2:
             up = np.array([0.,-1.,0.])
         reference = _level(up)
         yaw = np.unwrap(_heading(reference.T @ headings))
-        if previous_heading is not None:
-            correction = np.median(yaw[:6]) - previous_heading
+        frames = a + np.flatnonzero(direct)
+        if previous is not None:
+            old_frames, old_yaw = previous
+            if not fit_cut_velocity:
+                correction = np.median(yaw[:6]) - np.median(old_yaw)
+            elif frames[0] != old_frames[-1]+1:
+                correction = yaw[0] - old_yaw[-1]
+            else:
+                # Compare both estimates at the same transition time. Averaging
+                # each side at different times biases the alignment of turns.
+                cut = (frames[0] + old_frames[-1])/2
+                correction = (_heading_at_cut(yaw[:6], frames[:6], cut)
+                              - _heading_at_cut(old_yaw, old_frames, cut))
             reference = reference @ Rotation.from_rotvec([0.,correction,0.]).as_matrix()
             yaw -= correction
-        previous_heading = np.median(yaw[-6:])
+        previous = frames[-6:], yaw[-6:]
         out[a:b,:3,:3] = relative @ reference
     for a,b in intervals(~usable):
         if a and b < len(out):

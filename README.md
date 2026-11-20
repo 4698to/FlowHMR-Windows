@@ -6,9 +6,10 @@
 
 **[下载 Windows 便携版](https://github.com/xiaoerofficial021-collab/FlowHMR-Windows/releases/latest/download/FlowHMR-Windows.zip)** · [查看发布说明](https://github.com/xiaoerofficial021-collab/FlowHMR-Windows/releases/latest) · [FlowHMR 论文](https://arxiv.org/abs/2610.03691)
 
-## v0.3.7 更新
+## v0.3.8 更新
 
 - **便携版更新。** 从旧版顶栏打开「检查更新」，查看说明并下载安装。也可以手动导入官方便携 ZIP。
+- **本次修复。** 运动机位下的单人跨镜头接续在同一镜头内补框，并在切点对齐人物朝向。相机反求复用生成阶段的逐镜头机位和人物观测。
 - **相机反求（实验性）。** 动作完成后，可生成、预览和重算原片机位，或导出与动作配对的 FBX、VMD 和 NPZ。有推拉的镜头可根据原片估计机位与焦距。GeoCalib 用于估计地面倾角。
 - **人物片段接续与场景对齐（实验性）。** 用「按人物接续片段」串起同一人的镜头，也可逐个确认不同人物并对齐到同一个场景。接缝两侧有可靠的姿态时，会在切点附近调整肩、肘和腕的过渡。
 - **躯干动作优化。** 默认关闭。在生成设置开启后，程序多跑一轮 FlowHMR base，重新估计骨盆、脊柱、颈部和头部的转动，并以标准动作的脚部位置和朝向为目标。
@@ -16,7 +17,7 @@
 - **视频导入和播放。** 默认使用便携包内的 FFmpeg，并检查自定义 FFmpeg 路径。切换历史动作后，空格键可继续控制预览播放。
 - **远景预览与 MCP。** 改善预览拉远后部分角色的蒙皮闪烁。MCP 加入相机反求的生成、查询、停止和配对导出。
 
-[完整更新说明](docs/release-windows.md) · [上一版 v0.3.6](docs/release-windows-v0.3.6.md)
+[完整更新说明](docs/release-windows.md) · [上一版 v0.3.7](docs/release-windows-v0.3.7.md)
 
 ## 最低配置与支持设备
 

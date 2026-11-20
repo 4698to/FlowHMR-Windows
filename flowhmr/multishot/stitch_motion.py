@@ -8,7 +8,7 @@ from zipfile import BadZipFile
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from .timeline import held_indices, intervals
+from .timeline import held_indices, intervals, validity
 
 
 # 0.13 seconds on either side of a handoff at the normalized source rate.
@@ -110,6 +110,59 @@ def dropout_references(video_path, parts, first, last, cuts, check):
     finally:
         capture.release()
     return refs
+
+
+def _include_verified_edge_frames(parts, references):
+    """Supply same-shot boxes for short, visually verified boundary misses."""
+    expanded = []
+    for start, end, track_id, observed, boxes in parts:
+        a, b = start, end
+        while references.get(a-1) == start:
+            a -= 1
+        while references.get(b+1) == end:
+            b += 1
+        if (a, b) != (start, end):
+            boxes = np.pad(boxes, ((start-a, b-end), (0, 0)), mode='edge')
+        expanded.append((a, b, track_id, observed, boxes))
+    return expanded
+
+
+def _continuous_generation_parts(parts, arms, frame_limit):
+    """Run a common inference window through source-verified same-person cuts."""
+    groups = [[parts[0]]]
+    for part in parts[1:]:
+        group = groups[-1]
+        start, end = part[:2]
+        if start == group[-1][1]+1 and arms.get(start) == (0, 1) and end-group[0][0]+1 <= frame_limit:
+            group.append(part)
+        else:
+            groups.append([part])
+    return [
+        (group[0][0], group[-1][1], group[0][2],
+         np.concatenate([part[3] for part in group]), np.concatenate([part[4] for part in group]))
+        if len(group) > 1 else group[0] for group in groups
+    ]
+
+
+def _boxes_for_shot_timeline(start, boxes, observed, shot_ranges):
+    """Interpolate missing detections from the same image shot and retain their provenance."""
+    end = start + len(boxes)
+    aligned = boxes.copy()
+    pose_support = np.isin(np.arange(start, end), observed)
+    for left, right in shot_ranges:
+        a, b = max(start, left), min(end, right)
+        anchors = observed[(observed >= a) & (observed < b)]
+        if not len(anchors):
+            continue
+        timeline = np.arange(a, b)
+        for coord in range(4):
+            aligned[a-start:b-start, coord] = np.interp(timeline, anchors, boxes[anchors-start, coord])
+        # Only short detector misses may contribute to the cut's pose estimate.
+        supported = pose_support[a-start:b-start]
+        for u, v in intervals(~supported):
+            if v-u <= 2:
+                supported[u:v] = True
+    return aligned, pose_support
 
 
 def _ease_arm_handoff(poses, left, stop, start, right, arms):
@@ -226,18 +279,59 @@ def stitch_fragments(parts, first, last, *, cuts=(), references=None, observed_a
 
 
 def generate_fragments(engine, video_path, working_video, sub_dir, name, parts, first, last, *,
-                       options, prepared_dir, prepared_key, cuts, notify):
+                       options, prepared_dir, prepared_key, cuts, notify, shots=(), image_size_hw=None,
+                       camera_progress=None):
     """Run the ordinary single-track generator for every stretch of the selected identity."""
-    from .runtime import save_npz
+    from .runtime import estimate_shot_cameras, file_revision_digest, save_json, save_npz
     from .seam_observations import measure_cut_arms
-    from ..utils.runtime_capabilities import detection_request_key
+    from ..utils.runtime_capabilities import LONG_MOTION_EXPERIMENTAL_THRESHOLD, detection_request_key
     from ..utils.runtime_torso_optimization import save_composed_motion
 
     reports, origin_parts, final_parts, cameras = [], [], [], []
     seed = options['seed']
     has_final = engine.postprocess is not None or options['hamer']
     references = dropout_references(working_video, parts, first, last, cuts, options['cancel_check'])
+    check = options['cancel_check'] or (lambda: None)
+    share_camera = (not options['static_camera'] and len(shots) > 1
+                    and getattr(engine.sam_extractor, 'estimator', None) is not None)
+    arms = {}
+    seam_cache = Path(sub_dir) / f'{name}_seam_observations.npz'
+    if share_camera:
+        if prepared_dir is None:
+            parts = _include_verified_edge_frames(parts, references)
+        folder = Path(sub_dir) / 'linked'
+        video_hash = file_revision_digest(working_video)
+        raw_folder = folder / f'raw-{video_hash[:16]}'
+        raw_folder.mkdir(parents=True, exist_ok=True)
+        camera_options = {'params': {'static_camera': False, 'vggt_interval': options['vggt_frame_interval']}}
+        n = last-first+1
+        camera_progress = camera_progress or (lambda message, progress: None)
+        camera_progress('按镜头估计共用相机', 0)
+        raw, K, _ = estimate_shot_cameras(
+            raw_folder, camera_options, shots, first, n, image_size_hw, working_video, engine.device,
+            check, lambda message, pct: camera_progress(message, max(0., (pct-5)*100/13 - 100/len(shots))),
+            engine._release_camera_cuda,
+        )
+        camera_progress('动作与反求共用相机已就绪', 100)
+        ranges = np.array([[first+shot['start'], first+shot['end']] for shot in shots], dtype=np.int64)
+        observed_points = np.full((n, 70, 3), np.nan, dtype=np.float32)
+        detected = np.zeros(n, dtype=bool)
+        try:
+            arms = measure_cut_arms(engine, working_video, parts, (), cuts, seam_cache,
+                                    options['cancel_check'], MAX_DROPOUT, shared_camera=(first, K))
+        except (OSError, ValueError, RuntimeError, BadZipFile) as exc:
+            print(f'  [stitch] skipped image-supported arm transition: {exc}', flush=True)
+        if prepared_dir is None:
+            frame_limit = LONG_MOTION_EXPERIMENTAL_THRESHOLD
+            if engine._staged_models:
+                # Preserve the longest inference window in staged low-memory mode.
+                frame_limit = min(frame_limit, max(end-start+1 for start,end,*_ in parts))
+            parts = _continuous_generation_parts(parts, arms, frame_limit)
     for index, (start, end, track_id, observed, boxes) in enumerate(parts, 1):
+        if share_camera and prepared_dir is None:
+            boxes, pose_support = _boxes_for_shot_timeline(start, boxes, observed, ranges)
+        else:
+            pose_support = np.isin(np.arange(start, end+1), observed) if share_camera else None
         notify(index, len(parts))
         work = Path(sub_dir) / 'fragments' / f'{index:03d}-{start}-{end}'
         inputs = work / name
@@ -252,11 +346,24 @@ def generate_fragments(engine, video_path, working_video, sub_dir, name, parts, 
         extra = {} if prepared_key is None else {'sam2_input_key': np.asarray(prepared_key)}
         save_npz(detection, bbox=boxes, start_end=np.array([start,end]), observed_frames=observed,
                  detection_request=detection_request_key((start,end)), track_id=np.int64(track_id), **extra)
+        shared = None
+        if share_camera:
+            section = slice(start-first, end-first+1)
+            shared = dict(frame_range=(start, end), RT=raw[section], K=K[section],
+                          shot_ranges=ranges, pose_support=pose_support)
         engine.process_video(video_path, str(work), start_frame=start, end_frame=end,
                              prepared_inputs=prepared_dir is not None,
-                             prepared_inputs_dir=prepared_dir, **options)
+                             prepared_inputs_dir=prepared_dir, shared_camera=shared, **options)
         mode = 'static' if options['static_camera'] else 'vggt'
         cameras.append(inputs / f'{name}_{mode}_camera.npz')
+        if share_camera:
+            with np.load(inputs / f'{name}_sam3d_feat.pt.observations.npz', allow_pickle=False) as data:
+                if (not np.array_equal(data['source_frames'], np.arange(start, end+1))
+                        or not np.array_equal(data['K'], K[section])
+                        or not np.array_equal(data['boxes'], boxes)):
+                    raise ValueError('片段人物观测与共用相机输入不一致。')
+                observed_points[section] = data['points']
+            detected[observed-first] = True
         stem = f'{name}_seed{seed}'
         with np.load(inputs / f'{stem}_origin.npz', allow_pickle=False) as data:
             origin_parts.append((start,end,{key: data[key] for key in data.files}))
@@ -265,18 +372,28 @@ def generate_fragments(engine, video_path, working_video, sub_dir, name, parts, 
                 final_parts.append((start,end,{key: data[key] for key in data.files}))
         if engine.postprocess is not None:
             reports.append(dict(engine.postprocess.last_report))
-    try:
-        arms = measure_cut_arms(engine, working_video, parts, cameras, cuts,
-                                Path(sub_dir) / f'{name}_seam_observations.npz',
-                                options['cancel_check'], MAX_DROPOUT)
-    except (OSError, ValueError, RuntimeError, BadZipFile) as exc:
-        print(f'  [stitch] skipped image-supported arm transition: {exc}', flush=True)
-        arms = {}
+    if not share_camera:
+        try:
+            arms = measure_cut_arms(engine, working_video, parts, cameras, cuts, seam_cache,
+                                    options['cancel_check'], MAX_DROPOUT)
+        except (OSError, ValueError, RuntimeError, BadZipFile) as exc:
+            print(f'  [stitch] skipped image-supported arm transition: {exc}', flush=True)
     origin, report = stitch_fragments(origin_parts, first, last, cuts=cuts, references=references, observed_arms=arms)
     save_composed_motion(origin, os.path.join(sub_dir, f'{name}_seed{seed}_origin'), engine.smpl_model_path)
     if has_final:
         final, report = stitch_fragments(final_parts, first, last, cuts=cuts, references=references, observed_arms=arms)
         save_composed_motion(final, os.path.join(sub_dir, f'{name}_seed{seed}'), engine.smpl_model_path)
+    if share_camera:
+        motion = final if has_final else origin
+        valid = validity(motion.get('valid_frames'), len(observed_points))
+        observed_points[~(detected & valid)] = np.nan
+        packet = folder / 'camera_inputs.npz'
+        save_npz(packet, RT=raw, K=K, points=observed_points, valid=valid,
+                 image_size_hw=np.array(image_size_hw), track_start=first, observed_frames=first+np.flatnonzero(detected))
+        final_stem = f'{name}_seed{seed}' + ('' if has_final else '_origin')
+        save_json(packet.with_suffix('.json'), dict(shots=shots, video_sha256=video_hash,
+            sha256=file_revision_digest(packet), motion_sha256=file_revision_digest(Path(sub_dir)/f'{final_stem}.npz')))
+        report['shared_camera_inputs'] = True
     if reports:
         engine.postprocess.last_report = {**reports[0],
             'contacts': sum(item['contacts'] for item in reports),

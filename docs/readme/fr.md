@@ -6,16 +6,17 @@
 
 **[Télécharger l’édition portable pour Windows](https://github.com/xiaoerofficial021-collab/FlowHMR-Windows/releases/latest/download/FlowHMR-Windows.zip)** · [Notes de version](https://github.com/xiaoerofficial021-collab/FlowHMR-Windows/releases/latest) · [Article FlowHMR](https://arxiv.org/abs/2610.03691)
 
-## Nouveautés de la v0.3.7
+## Nouveautés de la v0.3.8
 
 - **Mise à jour de la version portable.** Ouvrez la vérification des mises à jour dans la barre supérieure pour lire les notes et installer la mise à jour. Vous pouvez aussi importer le ZIP portable officiel.
+- **Corrections de jonction et de reconstruction de la caméra.** Lors de la jonction des plans d’une même personne avec une caméra mobile, les brèves détections manquantes sont complétées à partir du même plan et l’orientation du personnage est alignée au raccord. La reconstruction réutilise les estimations par plan et les observations de la personne issues de la génération.
 - **Reconstruction de la caméra (expérimentale).** Après la génération du mouvement, retrouvez, prévisualisez ou recalculez la caméra d’origine. Exportez la caméra associée en FBX, VMD ou NPZ. Le calcul prend en compte les déplacements et les zooms. GeoCalib aide à estimer l’inclinaison du sol.
 - **Jonction par personne et alignement de scène (expérimentaux).** Réunissez les fragments d’une même personne sur une seule piste ou confirmez plusieurs personnes dans l’ordre pour les aligner dans une même scène. Les transitions des bras sont limitées aux raccords dont la pose est observable dans la vidéo.
 - **Optimisation du mouvement du torse.** Désactivée par défaut. Une génération supplémentaire avec FlowHMR base recalcule les rotations du bassin, de la colonne vertébrale, du cou et de la tête. Les positions et orientations des pieds du résultat standard servent de cibles.
 - **Modèles à la demande.** Le panneau des modèles permet de télécharger séparément SAM 2.1 (suivi expérimental lors des croisements), FlowHMR base et GeoCalib.
 - **Aperçu à distance et MCP.** Réduction du scintillement de certains personnages vus de loin. MCP peut lancer, interroger ou arrêter le calcul de la caméra et exporter les mouvements avec la caméra associée.
 
-[Notes de version complètes](../release-windows.md) · [Version précédente : v0.3.6](../release-windows-v0.3.6.md)
+[Notes de version complètes](../release-windows.md) · [Version précédente : v0.3.7](../release-windows-v0.3.7.md)
 
 ## Configuration requise et matériel compatible
 

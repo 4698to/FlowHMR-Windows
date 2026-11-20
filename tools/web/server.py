@@ -1386,6 +1386,13 @@ def run_job(job_id):
         json.dump(meta, f)
 
     shutil.copy2(result + ".npz", os.path.join(out_root, "motion.npz"))
+    if (motion_job.get("fragment_stitching") or {}).get("shared_camera_inputs"):
+        from flowhmr.multishot.runtime import bind_linked_camera_inputs
+
+        try:
+            bind_linked_camera_inputs(out_root, start, meta["num_frames"])
+        except (OSError, ValueError, KeyError, BadZipFile) as exc:
+            print(f"  [camera] could not bind shared observations: {exc}", flush=True)
     has_fbx = os.path.exists(result + ".fbx")
     if has_fbx:
         shutil.copy2(result + ".fbx", os.path.join(out_root, "motion.fbx"))

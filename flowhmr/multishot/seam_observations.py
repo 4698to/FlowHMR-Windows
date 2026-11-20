@@ -43,7 +43,7 @@ def observed_arms(points, K, frames, split, hw):
     return tuple(confirmed)
 
 
-def measure_cut_arms(engine, video, parts, camera_paths, cuts, cache, check, max_gap):
+def measure_cut_arms(engine, video, parts, camera_paths, cuts, cache, check, max_gap, *, shared_camera=None):
     if not cuts or not callable(getattr(engine.sam_extractor, 'scene_keypoints', None)):
         return {}
     requests, spans = {}, {}
@@ -61,11 +61,15 @@ def measure_cut_arms(engine, video, parts, camera_paths, cuts, cache, check, max
             continue
         spans[cut] = (outgoing, incoming)
         for i, part, indices in ((left_index, left, outgoing), (left_index+1, right, incoming)):
-            with np.load(camera_paths[i], allow_pickle=False) as camera:
-                intrinsic = camera['K']
-                for frame in indices:
-                    offset = frame-part[0]
-                    requests[int(frame)] = (part[4][offset], intrinsic[offset])
+            if shared_camera is None:
+                with np.load(camera_paths[i], allow_pickle=False) as camera:
+                    intrinsic = camera['K']
+            else:
+                start, K = shared_camera
+                intrinsic = K[part[0]-start:part[1]-start+1]
+            for frame in indices:
+                offset = frame-part[0]
+                requests[int(frame)] = (part[4][offset], intrinsic[offset])
     if not requests:
         return {}
 
