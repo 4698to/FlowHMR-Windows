@@ -13,6 +13,7 @@ import torch
 from torch import Tensor
 
 from flowhmr.model_files import YOLOX, file_present, resolve_model
+from flowhmr.multishot.shot_detection import ShotDetector
 from flowhmr.utils.runtime_capabilities import detection_request_key
 
 # Repo root (for locating checkpoints)
@@ -88,6 +89,9 @@ class TrackInfo:
     avg_area: float = 0.0
     bytetrack_ids: Tuple[int, ...] = ()
     sam2_object_ids: Tuple[int, ...] = ()
+    observed_frames: np.ndarray | None = None  # Real detections whenever boxes include synthetic endpoints.
+    shot_ranges: np.ndarray | None = None  # Absolute source ranges, with an exclusive end.
+    source_fragments: Tuple["TrackInfo", ...] = ()
 
     def __post_init__(self):
         if not self.bytetrack_ids:
@@ -105,6 +109,8 @@ class TrackingResult:
     width: int
     height: int
     scanned_range: tuple[int, int] | None = None  # inclusive source frame indices
+    shots: tuple = ()
+    edited_track: dict | None = None
 
 
 def open_video_at_frame(video_path, start_frame, cancel_check=None):
@@ -128,7 +134,6 @@ def open_video_at_frame(video_path, start_frame, cancel_check=None):
         raise
 
 
-# YOLOXHumanDetector
 class YOLOXHumanDetector:
     """YOLOX-based human detector, drop-in replacement for the old detectron2 HumanDetector."""
 
@@ -334,6 +339,7 @@ class VideoProcessor:
         on_progress=None,
         cancel_check=None,
         sam2_identity_objects=None,
+        find_shots: bool = False,
     ) -> TrackingResult:
         """Detect only the requested frames and keep track times on the original video timeline.
 
@@ -350,6 +356,7 @@ class VideoProcessor:
         )
         raw_tracks: Dict[int, Dict[str, list]] = defaultdict(lambda: defaultdict(list))
         frame_idx = start_frame
+        shot_detector = ShotDetector() if find_shots else None
 
         cap = open_video_at_frame(video_path, start_frame, cancel_check)
         try:
@@ -369,6 +376,8 @@ class VideoProcessor:
                 ok, frame_bgr = cap.read()
                 if not ok:
                     break
+                if shot_detector is not None:
+                    shot_detector.observe(frame_bgr)
 
                 results = self.detector.run_human_detection(
                     frame_bgr, det_cat_id=0, bbox_thr=bbox_thr, nms_thr=nms_thr, default_to_full_image=False,
@@ -428,15 +437,34 @@ class VideoProcessor:
             total_frames = frame_idx
         print(f">>> bbox detection done: {frame_idx - start_frame} frames "
               f"(source {start_frame + 1}–{last + 1}), {len(tracks)} tracks", flush=True)
-        result = TrackingResult(tracks, max(total_frames or 0, frame_idx), width, height,
-                                (start_frame, last))
+        shots = ()
+        if shot_detector is not None:
+            ranges, _ = shot_detector.finish()
+            shots = tuple((start_frame+shot["start"], start_frame+shot["end"]) for shot in ranges)
+        result = TrackingResult(tracks, max(total_frames or 0, frame_idx), width, height, (start_frame, last), shots)
         if sam2_identity_objects:
             from flowhmr.utils.track_identity import merge_result_identities
 
-            return merge_result_identities(result, sam2_identity_objects)
+            result = merge_result_identities(result, sam2_identity_objects)
+            result.shots = shots
         return result
 
     # Post-processing (all static)
+    @staticmethod
+    def replace_joined_track(result, candidate):
+        boxes = np.asarray(candidate["boxes"], dtype=np.float32)
+        frames = np.asarray(candidate["frames"], dtype=np.int64)
+        tracks = {track.track_id: track for track in result.tracks}
+        fragments = tuple(tracks[row["track_id"]] for row in candidate.get("source_tracks", ()))
+        result.tracks[candidate["track_index"]] = TrackInfo(
+            candidate["track_id"], frames, boxes, len(frames),
+            float(np.prod(boxes[:, 2:] - boxes[:, :2], axis=1).mean()),
+            bytetrack_ids=tuple(candidate.get("bytetrack_ids") or ()),
+            observed_frames=np.asarray(candidate["observed_frames"], dtype=np.int64),
+            shot_ranges=np.asarray(candidate["shot_ranges"], dtype=np.int64) if "shot_ranges" in candidate else None,
+            source_fragments=fragments,
+        )
+
     @staticmethod
     def select_best_track(result: TrackingResult) -> int:
         """Select best track index by (length, avg_area) descending. Returns -1 if no tracks."""
@@ -483,6 +511,16 @@ class VideoProcessor:
             bbox = np.tile(full_box[None, :], (end - start + 1, 1))
             return bbox, np.array([start, end], dtype=np.int64)
         track = result.tracks[track_idx]
+        if track.shot_ranges is not None:
+            start, stop = int(track.shot_ranges[0, 0]), int(track.shot_ranges[-1, 1])
+            bbox = np.tile(np.array([0,0,result.width,result.height], np.float32), (stop-start, 1))
+            for a, b in track.shot_ranges:
+                indices = (track.frames >= a) & (track.frames < b)
+                if indices.any():
+                    frames, boxes = track.frames[indices], track.bboxes[indices]
+                    for axis in range(4):
+                        bbox[a-start:b-start, axis] = np.interp(np.arange(a,b), frames, boxes[:,axis])
+            return VideoProcessor.smooth_bboxes(bbox, result.width, result.height), np.array([start, stop-1], dtype=np.int64)
         start, end = int(track.frames.min()), int(track.frames.max())
         bbox = VideoProcessor.interpolate_track(track, end - start + 1, first_frame=start)
         return VideoProcessor.smooth_bboxes(bbox, result.width, result.height), np.array([start, end], dtype=np.int64)
@@ -496,8 +534,20 @@ class VideoProcessor:
             extra["track_id"] = np.asarray(int(track.track_id), dtype=np.int64)
             extra["bytetrack_ids"] = np.asarray(track.bytetrack_ids, dtype=np.int64)
             extra["sam2_object_ids"] = np.asarray(track.sam2_object_ids, dtype=np.int64)
-        np.savez(path, bbox=bbox, start_end=start_end,
-                 detection_request=detection_request_key(frame_range), **extra)
+        if track_idx >= 0 and result.tracks:
+            track = result.tracks[track_idx]
+            observed = track.frames if track.observed_frames is None else track.observed_frames
+            extra["observed_frames"] = np.unique(observed).astype(np.int64, copy=False)
+            if track.shot_ranges is not None:
+                extra["shot_ranges"] = track.shot_ranges
+            if track.source_fragments:
+                fragments = track.source_fragments
+                extra["fragment_frames"] = np.concatenate([part.frames for part in fragments])
+                extra["fragment_boxes"] = np.concatenate([part.bboxes for part in fragments])
+                extra["fragment_ids"] = np.repeat([part.track_id for part in fragments],
+                                                 [len(part.frames) for part in fragments])
+        np.savez(path, bbox=bbox, start_end=start_end, detection_request=detection_request_key(frame_range),
+                 **extra)
 
     @staticmethod
     def smooth_bboxes(bbox_arr: np.ndarray, width: int, height: int) -> np.ndarray:

@@ -132,6 +132,40 @@ def build_tools(backend, exports):
         return Result({'job_id': job_id, 'scene_state': 'queued'})
 
     @register()
+    async def flowhmr_prepare_camera(job_id: JobID, force: bool = False) -> Result:
+        """Queue paired camera recovery without changing completed motion. Returns immediately.
+
+        By default, reuses an available result. Set force to recompute it, including after
+        installing GeoCalib. The previous result stays available until a successful replacement.
+        Existing queued/running requests are deduplicated. Poll flowhmr_get_camera_status
+        for the attempt state and the published camera revision.
+        Multi-person results require a ready shared scene first.
+        """
+        return Result({'job_id': job_id, **await backend.request(
+            'POST', f'/api/jobs/{job_id}/camera/prepare', json={'force': True} if force else {})})
+
+    @register(True)
+    async def flowhmr_get_camera_status(job_id: JobID, include_report: bool = False) -> Result:
+        """Read camera attempt state, progress and error. Optionally include the available camera's report.
+
+        The available flag refers to the published camera, including during recomputation.
+        Check quality.degraded and quality.reason for fallback gravity and coverage for timing gaps.
+        """
+        status=await backend.request('GET', f'/api/jobs/{job_id}/camera/status')
+        if include_report and status.get('available', status['camera_state'] == 'ready'):
+            status['report']=await backend.request('GET', f'/api/jobs/{job_id}/camera/report')
+        return Result({'job_id':job_id,**status})
+
+    @register()
+    async def flowhmr_cancel_camera(job_id: JobID) -> Result:
+        """Request cancellation of camera recovery while preserving any previous camera and completed motion.
+
+        Poll camera status afterwards. A completely saved result can win over a late cancel.
+        Use flowhmr_prepare_camera with force to retry when a previous camera is available.
+        """
+        return Result({'job_id':job_id,**await backend.request('POST',f'/api/jobs/{job_id}/camera/cancel',json={})})
+
+    @register()
     async def flowhmr_export_motion(options: ExportOptions) -> Result:
         """Queue a motion export to a local absolute path. Poll flowhmr_get_export(export_id).
 
@@ -139,6 +173,8 @@ def build_tools(backend, exports):
         Multi-person VMD/VRMA require .zip. FBX templates require skeleton only and no reference pose.
         Exports are independent of the viewer and don't bake its selected character or settings.
         NPZ exports the complete result. Only status=done proves a file was successfully published.
+        include_camera=true produces a .zip with matching source-body motion and camera,
+        recovering the camera first if needed. It does not bake a selected preview character.
         """
         return Result(await exports.submit(options))
 

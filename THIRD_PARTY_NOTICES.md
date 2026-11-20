@@ -7,6 +7,9 @@
 - The Windows bundle uses the Autodesk FBX Python runtime `fbx.pyd` from the pinned `fbxsdkpy` 2020.1.post2 Windows x64 wheel referenced by [upstream FlowHMR](https://github.com/flowhmr/flowhmr/blob/main/docs/install.md). This runtime is provided under [Autodesk's FBX SDK terms](https://aps.autodesk.com/developer/overview/fbx-sdk).
 - The VRM preview bundles Three.js r160 loaders and pixiv three-vrm 3.5.5 under their MIT licenses. [Versions and licenses](tools/web/static/vendor/three/vrm/README.md)
 
+- GeoCalib inference code is included under the Apache-2.0 license. The optional GeoCalib checkpoint is downloaded from the model panel. [Source and license](third_party/geocalib_inference/README.md)
+- The bundled person re-identification weights use YuNet, SFace and an OpenVINO person re-identification model. [Versions, sources and licenses](assets/person_reid/README.md)
+
 ## Autodesk FBX runtime notice
 
 This software contains Autodesk® FBX® code developed by Autodesk, Inc. Copyright 2019 Autodesk, Inc. All rights, reserved. Such code is provided “as is” and Autodesk, Inc. disclaims any and all warranties, whether express or implied, including without limitation the implied warranties of merchantability, fitness for a particular purpose or non-infringement of third party rights. In no event shall Autodesk, Inc. be liable for any direct, indirect, incidental, special, exemplary, or consequential damages (including, but not limited to, procurement of substitute goods or services; loss of use, data, or profits; or business interruption) however caused and on any theory of liability, whether in contract, strict liability, or tort (including negligence or otherwise) arising in any way out of such code.

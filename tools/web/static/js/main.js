@@ -200,7 +200,9 @@ $("btnStopRun").addEventListener("click", async () => {
   if (!id) return;
   $("btnStopRun").disabled = true;
   try {
-    await api.cancelJob(id);
+    const job = await api.getJob(id);
+    if (job.status === 'done' && ['queued', 'running', 'cancel_requested'].includes(job.camera_state)) await api.cancelCamera(id);
+    else await api.cancelJob(id);
     if (id === currentJob) await poll();
   } catch (e) {
     if (id === currentJob) progress.showActionError(e.message ? e : m("job.stop_failed"));
@@ -208,6 +210,9 @@ $("btnStopRun").addEventListener("click", async () => {
 });
 $("btnRerun").addEventListener("click", () => rerunCurrent());
 $("btnSafeRerun").addEventListener("click", () => rerunCurrent({ vggt_interval: 0, static_camera: false }));
+window.addEventListener('flowhmr:cameraprogress', (event) => {
+  if (event.detail.id === currentJob) void poll();
+});
 
 async function rerunCurrent(overrides) {
   if (!currentJob) return;
@@ -295,7 +300,9 @@ function clearDeletedJobs(ids) {
 function revision(job) {
   return JSON.stringify([job.id, job.status, job.progress, job.params, job.selected_person ?? null,
     job.person_count ?? null, job.message ?? null, job.loading_models ?? null, job.scene_state ?? null,
-    job.source_frames ?? null, job.stages ?? null, job.sam_batch ?? null, job.camera ?? null]);
+    job.source_frames ?? null, job.stages ?? null, job.sam_batch ?? null, job.camera ?? null,
+    job.camera_state ?? null, job.camera_progress ?? null, job.camera_finished ?? null,
+    job.camera_available ?? null, job.camera_revision ?? null]);
 }
 
 function syncExternalJobs(jobs, polling) {
@@ -373,14 +380,20 @@ async function poll() {
     $("menuNpz").disabled = false;
     show("dlNpz", true);
     try {
-      const meta = await viewer.load(id, job.scene);
-      if (meta && id === currentJob) void loadTracks(id, job.scene);
+      const meta = await viewer.load(id, job.scene, job);
+      if (meta && id === currentJob) {
+        void loadTracks(id, job.scene);
+        if (version !== pollVersion) void poll();
+      }
     } catch (e) {
       if (id === currentJob) {
         viewer.setStatus(m("view.preview_failed"));
         progress.showActionError(m("view.preview_detail", { detail: e }));
       }
     }
+  } else if (job.status === "done") {
+    viewer.updateCameraStatus(job);
+    motionExport.updateCameraStatus(job);
   }
 }
 

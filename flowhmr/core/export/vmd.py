@@ -9,6 +9,7 @@ from tempfile import NamedTemporaryFile
 
 import numpy as np
 from scipy.spatial.transform import Rotation
+from flowhmr.multishot.timeline import display_keys, held_indices, validity
 
 
 _UINT32_MAX = (1 << 32) - 1
@@ -132,7 +133,7 @@ def _quaternions(matrices):
     return values
 
 
-def _write(stream, poses, locations, start, scene_end):
+def _write(stream, poses, locations, start, scene_end, visible):
     tracks = _rotation_tracks(poses)
     count = len(poses) * len(tracks)
     if count > _UINT32_MAX:
@@ -151,12 +152,7 @@ def _write(stream, poses, locations, start, scene_end):
     # display/IK keys. The captured legs are FK and must not be pulled toward
     # the PMX's default foot IK target.
     stream.write(b"\0" * (4 * _VMD_COUNT.size))
-    end = start + len(poses) - 1
-    display = {0: False, start - 1: False} if start else {}
-    display[start] = True
-    if end < scene_end:
-        display[end] = True
-        display[end + 1] = False
+    display = display_keys(visible, start, scene_end)
     stream.write(_VMD_COUNT.pack(len(display)))
     # Some importers interpolate these switches as ordinary curves. Adjacent
     # keys at each boundary keep the last visible/invisible frame exact.
@@ -175,7 +171,8 @@ def export_vmd(npz_data, outname, *, start_frame=0, scene_end=None, reference_pa
     """
     if not isinstance(npz_data, Mapping):
         with np.load(npz_data, allow_pickle=False) as data:
-            motion = {key: data[key] for key in ("poses", "trans", "mocap_framerate", "betas") if key in data}
+            motion = {key: data[key] for key in ("poses", "trans", "mocap_framerate", "betas", "valid_frames")
+                      if key in data}
     else:
         motion = npz_data
     poses, trans = _motion_arrays(motion)
@@ -184,6 +181,10 @@ def export_vmd(npz_data, outname, *, start_frame=0, scene_end=None, reference_pa
     scene_end = end if scene_end is None else _frame(scene_end)
     if scene_end < end:
         raise ValueError("VMD scene ends before the motion")
+    visible = validity(motion.get("valid_frames"), len(poses))
+    if not visible.all():
+        held = held_indices(visible)
+        poses, trans = poses[held], trans[held]
     locations = trans * _POSITION_MIRROR
     locations[:, 1] += _source_floor(motion, reference_path)
     locations /= _METRES_PER_UNIT
@@ -197,7 +198,7 @@ def export_vmd(npz_data, outname, *, start_frame=0, scene_end=None, reference_pa
         with NamedTemporaryFile(mode="wb", prefix=".vmd-", suffix=".part", dir=destination.parent,
                                 delete=False) as stream:
             temporary = Path(stream.name)
-            _write(stream, poses, locations, start, scene_end)
+            _write(stream, poses, locations, start, scene_end, visible)
         os.replace(temporary, destination)
     finally:
         if temporary is not None:

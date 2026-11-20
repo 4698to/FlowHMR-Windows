@@ -214,6 +214,8 @@ body { display: flex; flex-direction: column; height: 100vh; }
 
 /* ---------------------------------------------------------------- person selection */
 .person-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.person-slot { display: flex; align-items: center; gap: 6px; }
+.person-slot > .person { flex: 1; width: auto; min-width: 0; }
 .person {
   position: relative; display: flex; align-items: center; gap: 12px; width: 100%; padding: 8px 40px 8px 8px;
   border: 1.5px solid var(--line); border-radius: 12px; background: rgba(255, 255, 255, 0.55);
@@ -248,6 +250,10 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .person-check svg { width: 13px; height: 13px; }
 .person:not(.selected) .person-check svg { visibility: hidden; }
 .person.selected .person-check { background: var(--green); border-color: var(--green); color: #fff; }
+.person-group-list, .person-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+.person-group-list { max-height: 72px; overflow: auto; margin-bottom: 6px; }
+.person-group-list button { padding: 3px 7px; font-size: 12px; }
+.person-actions button { flex: 1 1 122px; min-width: 0; }
 
 /* ---------------------------------------------------------------- video preview */
 .preview-title { font-size: 12px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 65%; }
@@ -395,3 +401,5 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .mcp-activity-list { max-height: 180px; overflow: auto; font-size: 12px; overflow-wrap: anywhere; }
 .mcp-activity-item { padding: 6px 0; border-bottom: 1px solid var(--line); }
 #mcpActivityStatus { max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.track-join-option { display:flex; align-items:center; gap:8px; margin:10px 0; font-size:12px; cursor:pointer; }
+.track-join-option input { margin:0; accent-color:var(--active); }

@@ -1,6 +1,8 @@
 // "Pipeline" card: queue state, stage progress and elapsed time, errors.
 import { $, show, el, formatSeconds, statusLabel, jobLabel } from "./utils.js";
 import { localize, message as m, serverMessage, setAttr, setText, t } from "./i18n.js";
+import { getCameraReport } from './api.js';
+import { multishotMessage, cameraAvailable, cameraStatusForJob, cameraStatusMessage, cameraQualityMessage } from './camera-messages.js';
 
 // Older histories and older runtimes carry human-readable progress strings.
 // Prefer structured message_code/message_params when present.
@@ -58,6 +60,8 @@ const COUNTERS = [
 
 function legacyMessage(value) {
   if (!value) return "";
+  const paired=multishotMessage(value);
+  if (paired) return localize(paired);
   if (LEGACY.has(value)) return t(LEGACY.get(value));
   for (const [pattern, key] of COUNTERS) {
     const match = value.match(pattern);
@@ -77,6 +81,31 @@ function legacyMessage(value) {
 
 export function initProgress() {
   const list = $("stageList");
+  let cameraJob = null, reportKey = null, requestedReport = null;
+  const details = $('pairedCameraDetails');
+  const cameraReportKey = (job) => `${job.id}:${job.camera_revision ?? job.camera_finished}`;
+  async function renderCameraReport() {
+    if (!details.open || !cameraJob || !cameraAvailable(cameraStatusForJob(cameraJob))) return;
+    const id = cameraJob.id, key = cameraReportKey(cameraJob);
+    if (reportKey === key || requestedReport === key) return;
+    requestedReport = key;
+    try {
+      const report = await getCameraReport(id);
+      if (requestedReport !== key || !cameraJob || cameraReportKey(cameraJob) !== key) return;
+      const rows = (report.shots || []).map((row) => {
+        const [a, b] = row.source_frames;
+        const first = report.track_start || 0;
+        return el('p', '', () => `${((a+first)/30).toFixed(1)}–${((b+first)/30).toFixed(1)}s · ${(row.labels || []).map(label => t(`camera.label_${label}`, {}, label)).join(' · ')}${row.error ? ` · ${row.error}` : ''}`);
+      });
+      $('pairedCameraReport').replaceChildren(el('p', '', m(report.shared_world ? 'camera.shared' : 'camera.confidence_hint')), ...rows);
+      reportKey = key;
+    } catch (error) {
+      if (cameraJob && cameraReportKey(cameraJob) === key && !reportKey) setText($('pairedCameraReport'), error);
+    } finally {
+      if (requestedReport === key) requestedReport = null;
+    }
+  }
+  details.addEventListener('toggle', renderCameraReport);
 
   function renderStages(stages, now) {
     const rows = [];
@@ -201,8 +230,10 @@ export function initProgress() {
       show("btnAlignScene", !!job.scene_needs_build);
       show("btnSafeRerun", ["failed", "cancelled"].includes(job.status) && !job.params.static_camera);
       const stop = $("btnStopRun");
-      show(stop, ["queued", "running", "waiting_user", "cancel_requested"].includes(job.status));
-      stop.disabled = job.status === "cancel_requested";
+      const status = cameraStatusForJob(job);
+      const cameraActive = job.status === 'done' && ['queued', 'running', 'cancel_requested'].includes(job.camera_state);
+      show(stop, cameraActive || ["queued", "running", "waiting_user", "cancel_requested"].includes(job.status));
+      stop.disabled = job.status === "cancel_requested" || job.camera_state === 'cancel_requested';
       setText(stop, m(stop.disabled ? "job.stopping" : "common.stop"));
       setText($("jobName"), () => jobLabel(job));
       $("jobId").textContent = job.id;
@@ -211,8 +242,24 @@ export function initProgress() {
       show("queueBox", queued);
       if (queued) setText($("queueText"), job.queue_position > 0
         ? m("progress.ahead", { count: job.queue_position }) : m("progress.starting_soon"));
-      renderStages(job.stages, job.now);
-      setText($("jobMsg"), () => jobMessage(job));
+      const cameraStages = job.camera_state && job.camera_state !== 'none' ? [{
+        name: 'paired_camera', label: t('camera.recovery'), detail: job.camera_message,
+        status: job.camera_state === 'ready' ? 'completed' : job.camera_state,
+        progress: job.camera_progress || 0, start: job.camera_started, end: job.camera_finished,
+      }] : [];
+      renderStages([...job.stages, ...cameraStages], job.now);
+      setText($("jobMsg"), () => [jobMessage(job), job.camera_state && job.camera_state!=='none'
+        ? localize(cameraStatusMessage(status)) : ''].filter(Boolean).join(' · '));
+      if (cameraJob?.id !== job.id) {
+        $('pairedCameraReport').replaceChildren();
+        reportKey = requestedReport = null;
+      }
+      cameraJob = job;
+      const warning = cameraQualityMessage(status.quality, status.coverage);
+      setText($('jobCameraWarning'), warning);
+      show('jobCameraWarning', cameraAvailable(status) && !!warning);
+      show(details, cameraAvailable(status));
+      void renderCameraReport();
       setText($("jobLongMotion"), job.long_motion_frames
         ? m("progress.long_motion", { frames: job.long_motion_frames }) : "");
       show("jobLongMotion", !!job.long_motion_frames);
@@ -222,10 +269,10 @@ export function initProgress() {
       renderCorrection(job.correction, job.params);
       setText($("workspaceState"), () => job.status === "running" ? `${job.progress}% · ${jobMessage(job)}`
         : job.status === "done" ? `${jobMessage(job)} · FlowHMR` : statusLabel(job.status));
-      const error = serverMessage(job.error_code, job.error_params, job.error);
+      const error = job.camera_error ? cameraStatusMessage(status) : serverMessage(job.error_code, job.error_params, job.error);
       setText($("jobError"), error);
-      setAttr($("jobError"), "title", job.error || "");
-      show("jobError", job.status === "failed" && !!localize(error));
+      setAttr($("jobError"), "title", job.camera_error || job.error || "");
+      show("jobError", (job.status === "failed" || job.camera_state === 'failed') && !!localize(error));
     },
     showError(msg) {
       show("jobCard");

@@ -32,6 +32,7 @@ SAM2_SOURCE_REVISION = "2b90b9f5ceec907a1c18123530e92e794ad901a4"
 SAM2_SOURCE_URL = f"https://codeload.github.com/{SAM2_CODE_REPO}/zip/{SAM2_SOURCE_REVISION}"
 SAM2_SOURCE_SHA256 = "fe93082a71a885a427894b1eab76341768781b6b58a298a0717e03862097d137"
 SAM2_SOURCE_SIZE = 55952852
+GEOCALIB_URL = "https://github.com/cvg/GeoCalib/releases/download/v1.0/geocalib-pinhole.tar"
 
 # The publishers' ModelScope files match the original model weights byte for byte.
 PERCEPTION_DOWNLOADS = (
@@ -66,6 +67,8 @@ def _flowhmr_asset(relative, size, sha256):
 _perception_assets = tuple(Asset(target, size, digest, (modelscope_file(repo, name),))
                            for repo, name, target, size, digest in PERCEPTION_DOWNLOADS)
 PUBLIC_ASSETS = {
+    "geocalib": (Asset(files.GEOCALIB, 116074121,
+        "86d6aeacd8bbd974c59ce39f61854e00d36911c732ad89be471476fd708722ac", (GEOCALIB_URL,)),),
     "flowhmr": (
         _flowhmr_asset(files.FLOWHMR_CONFIG, 3067, "5deae01800c031975558bf9675819e8d1e24803414f692b8b5c2196b266c64d7"),
         _flowhmr_asset(files.FLOWHMR_CKPT, 1841702021, "b7eb06b119feaf5ad7287bafdb2fff38d42dfc22ea9d256f8cdd2ada26dfc53a"),

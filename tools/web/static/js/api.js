@@ -1,5 +1,6 @@
 // Thin client for the FlowHMR demo server (tools/web/server.py).
 import { appError, localize, message, serverMessage } from "./i18n.js";
+import { cameraAvailable, cameraStatusMessage } from './camera-messages.js';
 
 function httpError(payload, status, statusText = "") {
   const fallback = payload?.error || message("server.http_status", { status, statusText });
@@ -28,10 +29,10 @@ async function request(path, options = {}) {
 }
 
 const json = (path, options) => request(path, options).then((r) => r.json());
-const postJson = (path, body) => json(path, {
+const postJson = (path, body, signal) => json(path, {
   method: "POST",
   headers: { "Content-Type": "application/json" },
-  body: JSON.stringify(body || {}),
+  body: JSON.stringify(body || {}), signal,
 });
 
 export const getInfo = () => json("/api/info", { cache: "no-store" });
@@ -128,11 +129,47 @@ export const retargetPresetThumbnailUrl = (id) => `${retargetPresetsUrl}/${encod
 export const saveRetargetPresetThumbnail = (id, png) => json(retargetPresetThumbnailUrl(id), {
   method:"POST", headers:{ "Content-Type":"image/png" }, body:png,
 });
-export const selectPeople = (id, people) => postJson(`/api/jobs/${id}/select`,
-  people.length === 1 ? { people, person: people[0] } : { people });
+export const selectPeople = (id, people, joinTracks = false) =>
+  postJson(`/api/jobs/${id}/select`, { people, join_tracks: joinTracks });
+export const selectPersonGroups = (id, groups, validateOnly = false) =>
+  postJson(`/api/jobs/${id}/select`, { person_groups: groups, validate_only: validateOnly });
 export const rerunJob = (id, params) => postJson(`/api/jobs/${id}/rerun`, params).then((res) => res.job_id);
 export const cancelJob = (id) => postJson(`/api/jobs/${id}/cancel`);
 export const prepareScene = (id) => postJson(`/api/jobs/${id}/scene`);
+export const getCamera = (id, signal) => json(`/api/jobs/${id}/camera`, { signal, cache: 'no-store' });
+export const cancelCamera = (id, signal) => postJson(`/api/jobs/${id}/camera/cancel`, {}, signal);
+export const getCameraStatus = (id, signal) => json(`/api/jobs/${id}/camera/status`, { signal, cache: 'no-store' });
+export const getCameraReport = (id) => json(`/api/jobs/${id}/camera/report`, { cache: 'no-store' });
+export async function prepareCamera(id, signal, onProgress = () => {}, { force = false } = {}) {
+  signal?.throwIfAborted();
+  let status = await postJson(`/api/jobs/${id}/camera/prepare`, force ? { force } : {}, signal);
+  while (true) {
+    signal?.throwIfAborted();
+    onProgress(status);
+    window.dispatchEvent(new CustomEvent('flowhmr:cameraprogress', { detail: { id, ...status } }));
+    if (force ? status.camera_state === 'ready' : cameraAvailable(status)) return status;
+    if (['failed', 'cancelled'].includes(status.camera_state)) {
+      const error=new Error(localize(cameraStatusMessage(status)));
+      error.i18n = cameraStatusMessage(status);
+      error.cause = status.error;
+      error.cameraStatus = status;
+      throw error;
+    }
+    await new Promise((resolve, reject) => {
+      const abort = () => { clearTimeout(timer); reject(signal.reason); };
+      const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve(); }, 700);
+      signal?.addEventListener('abort', abort, { once: true });
+    });
+    status = await getCameraStatus(id, signal);
+  }
+}
+export const exportCamera = (id, format, transform, signal) => request(`/api/jobs/${id}/camera/export`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, signal,
+  body: JSON.stringify({ format, transform: transform ?? { scale: 1, translation: [0, 0, 0] } }),
+}).then((response) => response.arrayBuffer());
+export const getMotionDownload = (url, signal) => request(url, { signal }).then(async (response) => ({
+  bytes: new Uint8Array(await response.arrayBuffer()), type: response.headers.get('Content-Type'),
+}));
 
 export const videoUrl = (id, converted, annotated = false) => `/api/jobs/${id}/video?source=${annotated ? "annotated" : converted ? "preview" : "original"}`;
 export const npzUrl = (id) => `/api/jobs/${id}/npz`;

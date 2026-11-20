@@ -57,6 +57,11 @@ def _motion_arrays(motion, start_frame):
         times[-1] = np.nextafter(times[-1], np.float32(-np.inf))
     if np.any(np.diff(times) <= 0):
         raise ValueError("VRMA frame times exceed float32 precision")
+    if "valid_frames" in motion:
+        from flowhmr.multishot.timeline import held_indices, validity
+
+        held = held_indices(validity(motion["valid_frames"], len(poses)))
+        poses, translation = poses[held], translation[held]
     return poses, translation, times
 
 

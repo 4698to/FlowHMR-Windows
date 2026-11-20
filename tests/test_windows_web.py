@@ -5,11 +5,13 @@ import os
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
+from threading import Event
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from flowhmr import model_files as files, model_integrity as integrity, model_sources as sources
+from flowhmr import sam2_setup
 from flowhmr.model_downloads import missing_downloads
 
 
@@ -57,6 +59,65 @@ class VideoSourceTest(unittest.TestCase):
                 with client.get(preview) as response:
                     self.assertEqual(response.data, converted)
                 self.assertEqual(canonical.read_bytes(), converted)
+
+
+class GroupedPeopleTest(unittest.TestCase):
+    def test_confirmation_waits_until_submit_and_each_child_uses_its_joined_track(self):
+        import numpy as np
+        from flowhmr.utils.runtime_video_processing import TrackInfo, TrackingResult
+
+        spans = [(0, 4), (1, 3), (5, 9), (6, 8)]
+        tracks, candidates = [], []
+        for index, (start, end) in enumerate(spans):
+            frames = np.arange(start, end + 1)
+            x = 14 * (index % 2)
+            boxes = np.tile([x, 0, x + 12, 16], (len(frames), 1)).astype(np.float32)
+            tracks.append(TrackInfo(index + 1, frames, boxes, len(frames), 192))
+            candidates.append(dict(index=index, track_index=index, track_id=index + 1,
+                                   start=start, end=end, num_frames=len(frames),
+                                   frames=frames.tolist(), boxes=boxes.tolist()))
+        shots = ((0, 5), (5, 10))
+        result = TrackingResult(tracks, 10, 32, 16, (0, 9), shots)
+        slot = dict(event=Event(), people=None, shots=shots)
+        parent = dict(id="parent", filename="two.mp4", ext=".mp4", status="waiting_user",
+                      params=server.DEFAULT_PARAMS.copy(), candidates=candidates, source_frames=10,
+                      body_reference="neutral")
+        jobs = {"parent": parent}
+        with TemporaryDirectory() as directory:
+            sub = Path(directory, "parent", "input")
+            sub.mkdir(parents=True)
+            (sub.parent / "input.mp4").write_bytes(b"fixture")
+            (sub / "input_30fps.mp4").write_bytes(b"fixture")
+            with (patch.object(server, "ARGS", SimpleNamespace(work_dir=directory)),
+                  patch.object(server, "JOBS", jobs), patch.object(server, "MEMBER_DIRS", {}),
+                  patch.object(server, "SELECTIONS", {"parent": slot}),
+                  patch.object(server, "CANCEL_REQUESTS", set()), patch.object(server, "enqueue"),
+                  server.app.test_client() as client):
+                route = "/api/jobs/parent/select"
+                for groups, error in (([[0, 1]], "track_join_overlap"), ([[0], [0, 2]], "track_join_invalid")):
+                    rejected = client.post(route, json=dict(person_groups=groups, validate_only=True))
+                    self.assertEqual(rejected.status_code, 400)
+                    self.assertEqual(rejected.json["error_code"], error)
+                confirmed = client.post(route, json=dict(person_groups=[[0, 2]], validate_only=True))
+                self.assertEqual(confirmed.status_code, 200)
+                self.assertTrue(slot["grouping"])
+                self.assertFalse(slot["event"].is_set())
+                self.assertIsNone(slot["people"])
+
+                submitted = client.post(route, json=dict(person_groups=[[0, 2], [1, 3]]))
+                self.assertEqual(submitted.status_code, 200)
+                self.assertEqual(submitted.json["people"], [0, 2, 1, 3])
+                self.assertTrue(slot["event"].is_set())
+                self.assertEqual(slot["people"], [0, 1])
+                joined = list(candidates)
+                for row in slot["joined"]:
+                    joined[row["index"]] = row
+                server._confirm_people("parent", result, joined, slot["people"], automatic=False)
+                child_id = next(key for key in jobs if key != "parent")
+                self.assertEqual([row["track_id"] for row in jobs[child_id]["track_fragments"]], [2, 4])
+                with np.load(Path(server.job_dir(child_id), "input/input_bbox.npz"), allow_pickle=False) as payload:
+                    np.testing.assert_array_equal(payload["observed_frames"], [1, 2, 3, 6, 7, 8])
+                    np.testing.assert_array_equal(payload["start_end"], [1, 8])
 
 
 class PreparedPeopleTest(unittest.TestCase):
@@ -315,7 +376,8 @@ class ModelIntegrityTest(unittest.TestCase):
             start.assert_called_with("C:/Models/mano_v1_2", kind="folder")
 
     def test_download_all_and_individual_actions_only_offer_public_files(self):
-        with TemporaryDirectory() as temporary, patch.object(files, "MODEL_ROOT", Path(temporary)):
+        with (TemporaryDirectory() as temporary, patch.object(files, "MODEL_ROOT", Path(temporary)),
+              patch.object(sam2_setup, "code_available", return_value=False)):
             args = SimpleNamespace(device="cuda:0", ckpt=None, model_cfg=None)
             with (patch.object(server, "ARGS", args), patch.object(server.RUNTIME, "summary", return_value={"pending_restart": False}),
                   patch.object(server.MODEL_DOWNLOADS, "start", return_value={"status": "idle"}) as start,

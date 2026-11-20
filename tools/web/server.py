@@ -28,7 +28,7 @@ import time
 import traceback
 import uuid
 from collections import defaultdict
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from functools import wraps
 from importlib.util import find_spec
 from pathlib import Path
@@ -50,6 +50,7 @@ from flowhmr.utils.runtime_capabilities import (
 from flowhmr.utils.runtime_hamer import hamer_available, HAMER_ISSUES, HAMER_STRIDES, MISSING_HAMER
 from flowhmr.utils.runtime_preview_inspection import PreviewInspection
 from flowhmr.utils.runtime_preview_thumbnail import ensure_thumbnail
+from flowhmr.utils.track_fragments import TrackJoinError, group_candidates, join_candidates
 from flowhmr.core.bodymodels.body_variants import available_variants, model_path, write_preview_vertices
 from flowhmr.model_files import (
     FLOWHMR_BASE_FILES, HAMER_FILES, MODEL_ROOT, SAM3D_FILES, VGGT, SMPLH_FILES, core_model_paths,
@@ -660,12 +661,15 @@ def restore_jobs():
                         )
                     stage.update(status="cancelled" if cancelled else "failed", end=interrupted_at)
         saved_params = job.get("params", {})
+        from flowhmr.multishot.tasks import restore_camera_state
+        restore_camera_state(job, entry.path)
         try:
             strength = _read_sole_fit_strength(saved_params)
         except ValueError:
             strength = 0.0
         # Older jobs that omit these settings retain the defaults they ran with.
         job["params"] = {**DEFAULT_PARAMS, "static_camera": False, "postprocess": False,
+                         "shot_linking": "off", "visible_arm_fit": False,
                          "correction_preset": "normal", "smoothing_frames": 0.0, **saved_params,
                          "sole_fit": strength > 0, "sole_fit_strength": strength}
         job.setdefault("stages", [])
@@ -742,8 +746,16 @@ def worker_loop():
         job_id = JOB_QUEUE.get()
         if isinstance(job_id, tuple):
             try:
-                _assemble_scene(job_id[1], automatic=False)
+                if job_id[0] == 'camera':
+                    CAMERA_TASKS.run(job_id[1])
+                else:
+                    _assemble_scene(job_id[1], automatic=False)
             finally:
+                if ENGINE is not None:
+                    try:
+                        ENGINE.release_stage()
+                    except Exception:
+                        traceback.print_exc()
                 JOB_QUEUE.task_done()
             continue
         try:
@@ -837,15 +849,21 @@ def _selected_track(candidate, *, automatic=False):
     return {"selected_person": candidate["index"], "selection_auto": automatic,
             "person_track": {key: candidate[key] for key in ("track_id", "num_frames", "start", "end")}
                             | {"bytetrack_ids": list(bytetrack_ids),
-                               "sam2_object_ids": list(candidate.get("sam2_object_ids") or [])}}
-
+                               "sam2_object_ids": list(candidate.get("sam2_object_ids") or [])},
+            "track_fragments": candidate.get("source_tracks")}
 
 def _confirm_people(job_id, result, candidates, people, *, automatic):
     """Keep the first track in this job and queue a separate job for each other track."""
-    first, *remaining = people
-    changes = dict(status="running", candidates=None, **_selected_track(candidates[first], automatic=automatic),
+    from flowhmr.utils.runtime_video_processing import VideoProcessor
+
+    first, *remaining = (candidates[index] for index in people)
+    for candidate in (first, *remaining):
+        if "observed_frames" in candidate:
+            VideoProcessor.replace_joined_track(result, candidate)
+    changes = dict(status="running", candidates=None, suggested_join=None,
+                   **_selected_track(first, automatic=automatic),
                    message="No selection - using default person" if automatic
-                   else f"已选择 {len(people)} 人" if remaining else f"已选择人物 {first + 1}")
+                   else f"已选择 {len(people)} 人" if remaining else f"已选择人物 {first['index'] + 1}")
     if not remaining:
         with JOBS_LOCK:
             if job_id in CANCEL_REQUESTS:
@@ -853,8 +871,6 @@ def _confirm_people(job_id, result, candidates, people, *, automatic):
             JOBS[job_id].update(changes)
             _persist_job_locked(JOBS[job_id])
         return
-
-    from flowhmr.utils.runtime_video_processing import VideoProcessor
 
     with JOBS_LOCK:
         parent = JOBS[job_id]
@@ -867,9 +883,8 @@ def _confirm_people(job_id, result, candidates, people, *, automatic):
     children = []
     # Prepare complete jobs outside the live queue so a polling client cannot see half a job.
     with tempfile.TemporaryDirectory(prefix=".person-batch-", dir=directory) as staging:
-        for i in remaining:
+        for candidate in remaining:
             _raise_if_cancelled(job_id)
-            candidate = candidates[i]
             child = _build_job(filename, params.copy(), ext)
             child.update(_selected_track(candidate), person_batch=job_id,
                          source=parent.get('source', 'desktop'),
@@ -881,7 +896,7 @@ def _confirm_people(job_id, result, candidates, people, *, automatic):
             os.makedirs(sub_dir)
             _link_video(os.path.join(directory, video), os.path.join(child_stage, video))
             _link_video(os.path.join(directory, canonical), os.path.join(child_stage, canonical))
-            _copy_person_thumbnail(directory, child_stage, i)
+            _copy_person_thumbnail(directory, child_stage, candidate["index"])
             prepared_source = os.path.join(directory, SUB, "sam2_inputs")
             if os.path.isfile(os.path.join(prepared_source, "manifest.json")):
                 from flowhmr.utils.sam2_person_inputs import save_prepared_track
@@ -1016,7 +1031,7 @@ def _assemble_scene(batch, *, automatic):
             device = torch.device("cpu")  # VGGT and scene geometry run on the host.
         acquire_sam = ENGINE.scene_sam if ENGINE is not None else load_scene_sam
         scene = build_group_scene(Path(job_dir(batch)) / "scene", done, INSPECTION, acquire_sam, device,
-                                  check=check, notify=notify)
+                                  check=check, notify=notify, release_camera=ENGINE._release_camera_cuda if ENGINE is not None else nullcontext)
         update_job(batch, scene=scene, scene_state="ready", scene_error=None, scene_finished=time.time())
         print(f"  [scene] {batch}: {len(scene['people'])} aligned people, source frames {scene['track_start'] + 1}–{scene['track_end'] + 1}", flush=True)
     except JobCancelled:
@@ -1230,7 +1245,24 @@ def run_job(job_id):
 
     def select_person(result, candidates, default_idx):
         """Pause for one or more choices; continue this single-person pipeline on the first."""
-        slot = {"event": threading.Event(), "people": None}
+        previous = get_job(job_id).get("restore_fragments")
+        if previous:
+            keys = ("track_id", "start", "end")
+            available = {tuple(candidate[key] for key in keys): candidate["index"] for candidate in candidates}
+            indices = [available.get(tuple(part[key] for key in keys)) for part in previous]
+            if all(index is not None for index in indices):
+                try:
+                    joined = join_candidates(candidates, indices, result.scanned_range, shots=result.shots)
+                except TrackJoinError:
+                    pass
+                else:
+                    selected = list(candidates)
+                    selected[joined["index"]] = joined
+                    _confirm_people(job_id, result, selected, [joined["index"]], automatic=False)
+                    return joined["index"]
+        slot = {"event": threading.Event(), "people": None, "shots": getattr(result, "shots", ())}
+        edited_track = getattr(result, "edited_track", None)
+        suggested = edited_track["fragment_indices"] if edited_track else None
         try:
             save_person_thumbnails(job_id, candidates)
         except Exception:  # thumbnails are only a UI aid
@@ -1244,14 +1276,17 @@ def run_job(job_id):
                 status="waiting_user", paused_at=time.time(),
             )
             job.update(status="waiting_user", candidates=candidates, default_person=default_idx,
+                       suggested_join=suggested,
                        video_size=[result.width, result.height],
-                       message=f"检测到 {len(candidates)} 人，请勾选要生成的人物")
+                       message=(f"建议将 {len(suggested)} 个片段接续为同一人"
+                                if suggested else f"检测到 {len(candidates)} 条人物轨迹，请勾选要生成的轨迹"))
             _persist_job_locked(job)
         try:
             slot["event"].wait(SELECT_TIMEOUT_S)
         finally:
             with JOBS_LOCK:
                 people = slot["people"]
+                joined = slot.get("joined", ())
                 stage = JOBS[job_id]["stages"][STAGE_INDEX["detection"]]
                 stage["paused_seconds"] = stage.get("paused_seconds", 0.0) + max(
                     0.0, time.time() - stage.pop("paused_at"),
@@ -1259,9 +1294,13 @@ def run_job(job_id):
                 stage["status"] = "running"
                 SELECTIONS.pop(job_id, None)
         _raise_if_cancelled(job_id)
-        if people is None and JOBS[job_id].get('selection_policy') == 'explicit':
+        if people is None and (slot.get("grouping") or JOBS[job_id].get('selection_policy') == 'explicit'):
             raise UserMessage('等待人物选择已超时，请重跑任务并重新选择。', 'selection_timeout')
         chosen = people or [default_idx]
+        if joined:
+            candidates = list(candidates)
+            for candidate in joined:
+                candidates[candidate["index"]] = candidate
         _confirm_people(job_id, result, candidates, chosen, automatic=people is None)
         return chosen[0]
 
@@ -1289,7 +1328,7 @@ def run_job(job_id):
         static_camera=params.get("static_camera", False),
         sam_chunk_size=params.get("sam_chunk_size", DEFAULT_PARAMS["sam_chunk_size"]),
         sam_hand_stride=params["sam_hand_stride"],
-        person_selector=select_person if params.get("manual_select", True) else None,
+        person_selector=select_person if params.get("manual_select", True) or get_job(job_id).get("restore_fragments") else None,
         progress_callback=on_progress,
         cancel_check=lambda: _raise_if_cancelled(job_id),
         details_callback=lambda details: update_job(job_id, **details),
@@ -1312,6 +1351,22 @@ def run_job(job_id):
         if correction_report is not None:
             engine.postprocess.last_report = correction_report
         update_job(job_id, torso_opt=torso)
+        _raise_if_cancelled(job_id)
+
+    motion_job = get_job(job_id)
+    if motion_job.get("shot_linking_report") and not motion_job.get("fragment_stitching"):
+        from flowhmr.multishot.wrist_alignment import refine_linked_motion
+
+        update_job(job_id, message="正在按原片对齐跨镜头手腕")
+        try:
+            wrist_alignment = refine_linked_motion(job_dir(job_id), result, motion_job, engine,
+                check=lambda: _raise_if_cancelled(job_id), notify=lambda msg, _: update_job(job_id, message=msg))
+        except (OSError, ValueError, KeyError, BadZipFile, np.linalg.LinAlgError) as exc:
+            # Optional image observations must not block completed motion.
+            print(f"  [wrist] skipped: {exc}", flush=True)
+            wrist_alignment = dict(status="unavailable", reason=str(exc))
+        if wrist_alignment is not None:
+            update_job(job_id, wrist_alignment=wrist_alignment)
         _raise_if_cancelled(job_id)
 
     update_job(job_id, message="Building 3D mesh")
@@ -1873,6 +1928,7 @@ def api_character_resource(ticket):
 def jobs_active():
     with JOBS_LOCK:
         return any(job["status"] in ACTIVE_STATUSES or job.get("scene_state") in ACTIVE_STATUSES
+                   or job.get("camera_state") in ACTIVE_CAMERA_STATES
                    for job in JOBS.values())
 
 
@@ -2111,21 +2167,30 @@ def api_rerun(job_id):
         metadata = submission_metadata(body, params)
     except UserMessage as e:
         return api_error(e.code, str(e), 400, **e.params)
+    src_sub = os.path.join(job_dir(job_id), SUB)
+    bbox_name = f"{SUB}_bbox.npz"
+    reselect = _to_bool(body.get("reselect_person"), False)
+    legacy_join = False
+    if not reselect and src.get("track_fragments"):
+        try:
+            with np.load(os.path.join(src_sub, bbox_name), allow_pickle=False) as saved:
+                legacy_join = "fragment_frames" not in saved.files
+        except (OSError, ValueError, BadZipFile):
+            legacy_join = True
+        if legacy_join:
+            metadata["restore_fragments"] = src["track_fragments"]
     job = new_job(src["filename"], params, src["ext"], **metadata)
     _link_video(input_video(job_id), input_video(job["id"]))
     old_thumbnail = os.path.join(job_dir(job_id), "thumbnail.jpg")
     if os.path.isfile(old_thumbnail):
         shutil.copy2(old_thumbnail, os.path.join(job_dir(job["id"]), "thumbnail.jpg"))
-    src_sub = os.path.join(job_dir(job_id), SUB)
     if src["status"] in ("done", "failed", "cancelled") and os.path.isdir(src_sub):
         dst_sub = os.path.join(job_dir(job["id"]), SUB)
         os.makedirs(dst_sub, exist_ok=True)
         skip = (f"{SUB}_seed",)  # generated motion is recomputed
-        reselect = _to_bool(body.get("reselect_person"), False)
         camera_changed = params["static_camera"] != src["params"].get("static_camera", False)
         scan_range = job_detection_range(params)
-        bbox_name = f"{SUB}_bbox.npz"
-        detection_changed = (reselect or job_detection_range(src["params"]) != scan_range or
+        detection_changed = (reselect or legacy_join or job_detection_range(src["params"]) != scan_range or
                              not cached_detection_matches(os.path.join(src_sub, bbox_name), scan_range))
         if detection_changed:
             skip += (bbox_name,)
@@ -2159,7 +2224,7 @@ def api_rerun(job_id):
         if person is not None and not reselect and os.path.isfile(os.path.join(dst_sub, f"{SUB}_bbox.npz")):
             _copy_person_thumbnail(job_dir(job_id), job_dir(job["id"]), person)
             update_job(job["id"], selected_person=person, person_track=src.get("person_track"),
-                       selection_auto=src.get("selection_auto", False))
+                       selection_auto=src.get("selection_auto", False), track_fragments=src.get("track_fragments"))
     enqueue(job)
     return jsonify(job_id=job['id'], status='queued', params=params, selection_policy=job['selection_policy'])
 
@@ -2192,11 +2257,18 @@ def api_cancel_job(job_id):
 
 @app.route("/api/jobs/<job_id>/select", methods=["POST"])
 def api_select(job_id):
-    """Resume with {"people": [candidate indices]}; older clients may send one person."""
+    """Select independent tracks or explicitly group fragments per person."""
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         return api_error("people_required", "请提交所选人物。", 400)
     people = body.get("people", [body.get("person")])
+    join = body.get("join_tracks", False)
+    grouped = "person_groups" in body
+    groups = body.get("person_groups")
+    validate_only = body.get("validate_only", False)
+    if (type(join) is not bool or type(validate_only) is not bool
+            or (grouped and join) or (validate_only and not grouped)):
+        return api_error("track_join_invalid", "Invalid track joining request.", 400)
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if job is None:
@@ -2204,13 +2276,36 @@ def api_select(job_id):
         slot = SELECTIONS.get(job_id)
         if slot is None or slot["event"].is_set() or job["status"] != "waiting_user":
             return api_error("person_choice_closed", "此任务已不在等待选人。", 409)
-        n = len(job["candidates"] or [])
-        if not isinstance(people, list) or not people or any(type(i) is not int or not 0 <= i < n for i in people):
-            return api_error("people_required", "请至少勾选一个已检测到的人物。", 400)
-        people = list(dict.fromkeys(people))
-        slot["people"] = people
-        slot["event"].set()
-    return jsonify(ok=True, person=people[0], people=people)
+        candidates = job["candidates"]
+        if not grouped:
+            if not isinstance(people, list) or not people or any(type(i) is not int or not 0 <= i < len(candidates) for i in people):
+                return api_error("people_required", "请至少勾选一个已检测到的人物。", 400)
+            people = list(dict.fromkeys(people))
+        chosen = people
+        joined = []
+        if join or grouped:
+            total = job.get("source_frames") or 0
+            if total <= 0:
+                return api_error("track_join_coverage", "Requested video range is not available.", 400)
+            start, end = job_detection_range(job["params"])
+            end = total - 1 if end is None else min(end, total - 1)
+            shots = slot.get("shots", ())
+            try:
+                if grouped:
+                    joined = group_candidates(candidates, groups, (start, end), shots=shots)
+                    people = [index for group in groups for index in group]
+                else:
+                    joined = [join_candidates(candidates, people, (start, end), shots=shots)]
+            except TrackJoinError as error:
+                return api_error(error.code, "Cannot safely join these track fragments.", 400)
+            chosen = [candidate["index"] for candidate in joined]
+        if validate_only:
+            slot["grouping"] = True
+        else:
+            slot["joined"] = joined
+            slot["people"] = chosen
+            slot["event"].set()
+    return jsonify(ok=True, person=chosen[0], people=people)
 
 
 @app.route("/api/jobs/<job_id>/scene", methods=["POST"])
@@ -2243,6 +2338,11 @@ def api_job(job_id):
         job["has_vmd"] = os.path.isfile(motion)
         job["has_vrma"] = job["has_vmd"]
         job["has_fbx"] = job["has_vmd"] and fbx_export_available(job_body_reference(job))
+        camera_status = CAMERA_TASKS.status(job_id)
+        job.update(camera_state=camera_status['camera_state'], camera_available=camera_status['available'],
+                   camera_revision=camera_status['revision'], camera_quality=camera_status['quality'],
+                   camera_coverage=camera_status['coverage'], camera_message=camera_status['message'],
+                   camera_progress=camera_status['progress'], camera_error=camera_status['error'])
     canonical = os.path.join(job_dir(job_id), SUB, f"{SUB}_30fps.mp4")
     job["has_preview_video"] = os.path.isfile(canonical)
     job["has_annotated_video"] = os.path.isfile(os.path.join(job_dir(job_id), "preview_overlay.mp4"))
@@ -2305,7 +2405,9 @@ def api_jobs():
 
     keys = ("id", "filename", "status", "progress", "created", "finished", "num_frames", "params", "recovered", "source", "selection_policy",
             "selected_person", "person_count", "person_done", "message", "loading_models", "scene_state", "source_frames", "stages",
-            "sam_batch", "camera", "crossing_opt_used", "crossing_opt_reason")
+            "sam_batch", "camera", "crossing_opt_used", "crossing_opt_reason",
+            "camera_state", "camera_progress", "camera_finished",
+            "camera_available", "camera_revision")
     with JOBS_LOCK:
         groups = defaultdict(list)
         for row in JOBS.values():
@@ -2366,7 +2468,8 @@ def api_delete_jobs():
                     skipped.append({"id": job_id, "reason": "not found"})
                 continue
             members = _batch_members_locked(job_id) or [job]
-            if any(j["status"] in ACTIVE_STATUSES for j in members) or job.get("scene_state") in ACTIVE_STATUSES:
+            if (any(j["status"] in ACTIVE_STATUSES or j.get('camera_state') in ACTIVE_CAMERA_STATES for j in members)
+                    or job.get("scene_state") in ACTIVE_STATUSES):
                 skipped.append({"id": job_id, "reason": "job is still active"})
                 continue
             try:
@@ -2410,14 +2513,16 @@ def api_person_thumb(job_id, index):
 @app.route("/api/jobs/<job_id>/track")
 def api_track(job_id):
     """Tracked person's boxes (xyxy, pixels of the 30 fps video), available after detection."""
-    get_job(job_id)
+    job = get_job(job_id)
     path = os.path.join(job_dir(job_id), SUB, f"{SUB}_bbox.npz")
     if not os.path.exists(path):
         abort(404)
-    data = np.load(path)
-    start, end = (int(x) for x in data["start_end"])
+    with np.load(path, allow_pickle=False) as data:
+        start, end = (int(x) for x in data["start_end"])
+        boxes = np.round(data["bbox"].astype(np.float64), 1).tolist()
+    gaps = (job.get("shot_linking_report") or {}).get("unobserved_source_ranges", [])
     return jsonify({"fps": 30, "start": start, "end": end,
-                    "boxes": np.round(data["bbox"].astype(np.float64), 1).tolist()})
+                    "boxes": boxes, "unobserved_source_ranges": gaps})
 
 
 _RESULT_FILES = {
@@ -2758,7 +2863,8 @@ def write_humanoid_motion(source, path, chosen, format_name, export_person):
 
         def write(person, output):
             number, first, last = person["person"], person["start"], person["end"]
-            motion = {key: data[f"{key}_{number}"] for key in ("poses", "trans", "betas")}
+            motion = {key: data[f"{key}_{number}"] for key in ("poses", "trans", "betas", "valid_frames")
+                      if f"{key}_{number}" in data}
             if motion["trans"].shape != (last - first + 1, 3):
                 raise ValueError(f"{format_name.upper()} source range does not match the scene motion")
             export_person({**motion, "mocap_framerate": fps}, output, person)
@@ -2810,7 +2916,7 @@ def api_vmd(job_id):
                 from flowhmr.core.export.vmd import export_vmd
 
                 os.makedirs(folder, exist_ok=True)
-                end = max(p["end"] for p in chosen) if chosen is not None else None
+                end = max(person["end"] for person in chosen) if chosen is not None else None
 
                 def write(motion, output, person):
                     export_vmd(motion, output, start_frame=person["start"] if person else 0,
@@ -2972,7 +3078,8 @@ def api_result(job_id, kind):
                          mimetype="application/octet-stream", as_attachment=True,
                          download_name=f"{os.path.splitext(job['filename'])[0]}_flowhmr_scene.npz", conditional=True)
     rel, mime = _RESULT_FILES[kind]
-    path = os.path.join(job_dir(job_id), rel)
+    directory = job_dir(job_id)
+    path = os.path.join(directory, rel)
     reference = job_body_reference(job)
     body = request.args.get("body", "source")
     if kind == "vertices" and body not in (reference, "source"):
@@ -2984,17 +3091,120 @@ def api_result(job_id, kind):
             error = missing_body_reference(reference)
             return api_error(error.code, str(error), 409, **error.params)
         try:
-            path = variant_preview(job_dir(job_id), body, reference, reference_path)
+            path = variant_preview(directory, body, reference, reference_path)
         except FileNotFoundError:
             abort(404)
         except (ValueError, KeyError) as exc:
             return api_error("body_variant", str(exc), 400, variant=body)
     if not os.path.exists(path):
         abort(404)
+    if kind == 'meta':
+        from flowhmr.multishot.timeline import preview_shot_ids
+        with open(path, encoding='utf-8') as stream:
+            meta = json.load(stream)
+        shot_ids = preview_shot_ids(meta, job)
+        if shot_ids is None:
+            # Older accepted jobs can have a compact report without tracks.
+            # Their saved camera still carries the original cut timeline.
+            saved_camera = Path(job_dir(job_id)) / 'camera/camera.npz'
+            if saved_camera.is_file():
+                try:
+                    with np.load(saved_camera, allow_pickle=False) as data:
+                        if (int(data['track_start']) == int(meta.get('track_start', 0)) and
+                                len(data['shot_ids']) == meta['num_frames']):
+                            shot_ids = data['shot_ids'].tolist()
+                except (OSError, ValueError, KeyError, BadZipFile):
+                    pass  # Camera recovery failures must not disable the body preview.
+        if shot_ids is not None:
+            meta['shot_ids'] = shot_ids
+        visible_ranges = (job.get('fragment_stitching') or {}).get('visible_ranges')
+        if visible_ranges is not None:
+            meta['visible_ranges'] = visible_ranges
+        return jsonify(meta)
     as_attachment = kind == "npz"
     name = f"{export_stem(job)}_flowhmr.{kind}" if as_attachment else None
     return send_file(path, mimetype=mime, as_attachment=as_attachment,
                      download_name=name, conditional=True)
+
+
+def _paired_camera_joints(job_id, directory):
+    if get_job(job_id).get('person_batch') == job_id:
+        with np.load(Path(directory) / 'camera/shared-frame.npz', allow_pickle=False) as data:
+            return data['joints']
+    path, info = INSPECTION.load(directory, body_reference=job_body_reference(get_job(job_id)))
+    return np.fromfile(path, dtype='<f4').reshape(info['frames'], 52, 3)
+
+
+from flowhmr.multishot.web import register_camera_routes
+from flowhmr.multishot.tasks import CameraTasks, ACTIVE_CAMERA_STATES
+
+
+def _build_paired_camera(job_id, *, check, notify):
+    import torch
+    from flowhmr.multishot.runtime import build_camera
+    from flowhmr.utils.runtime_sam_features import build_sam3d_extractor
+    device = ENGINE.device if ENGINE is not None else resolve_inference_device(ARGS.device)
+    xpu_backbone = device if device.type == 'xpu' else None
+    if xpu_backbone is not None:
+        device = torch.device('cpu')
+
+    @contextmanager
+    def load_camera_sam():
+        check()
+        notify('正在加载人物观测模型', 20)
+        with closing(build_sam3d_extractor(device, xpu_backbone_device=xpu_backbone)) as extractor:
+            yield extractor
+
+    release_cuda = ENGINE._release_camera_cuda if ENGINE is not None else nullcontext
+    acquire_sam = ENGINE.scene_sam if ENGINE is not None else load_camera_sam
+
+    @contextmanager
+    def checked_camera_sam():
+        if RUNTIME.cuda_variant() == 'cu121':
+            _check_cu121_weights(tuple(map(resolve_model, SAM3D_FILES)))
+        with acquire_sam() as extractor:
+            yield extractor
+
+    @contextmanager
+    def checked_camera_vggt():
+        if RUNTIME.cuda_variant() == 'cu121':
+            _check_cu121_weights((resolve_model(VGGT),))
+        with release_cuda():
+            yield
+
+    try:
+        job = get_job(job_id)
+        if job.get('person_batch') == job_id and not (Path(job_dir(job_id)) / 'scene/camera/shared-frame.npz').is_file():
+            from flowhmr.utils.runtime_group_scene import build_group_scene
+            with JOBS_LOCK:
+                saved_ids = {person['id'] for person in job['scene']['people']}
+                members = [(copy.deepcopy(m), job_dir(m['id'])) for m in _batch_members_locked(job_id)
+                           if m['id'] in saved_ids and m['status'] == 'done']
+            build_group_scene(Path(job_dir(job_id)) / 'scene', members, INSPECTION, checked_camera_sam,
+                              device, check=check, notify=lambda msg: notify(msg, 25), camera_only=True,
+                              release_camera=checked_camera_vggt)
+        build_camera(job_dir(job_id), get_job(job_id), INSPECTION,
+                     checked_camera_sam, device,
+                     check=check, notify=notify,
+                     release_cuda=checked_camera_vggt)
+    finally:
+        if ENGINE is not None:
+            ENGINE.release_stage()
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+
+
+CAMERA_TASKS = CameraTasks(get_job, job_dir, update_job, JOB_QUEUE.put, _build_paired_camera)
+
+
+@requires_runtime
+def _queue_paired_camera(job_id, *, force=False):
+    status = CAMERA_TASKS.prepare(job_id, force=force)
+    return jsonify(status), 200 if status["available"] and not force else 202
+
+
+register_camera_routes(app, get_job, job_dir, _paired_camera_joints, CAMERA_TASKS,
+                       queue_camera=_queue_paired_camera)
 
 
 # --------------------------------------------------------------------------- main

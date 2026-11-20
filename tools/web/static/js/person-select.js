@@ -27,11 +27,30 @@ export function initPersonSelect(bus) {
   let defaultIdx = null;
   let previewIndex = null, lockedIndex = null;
   const selected = new Set();
+  const groups = [];
   let rows = [];
   let mode = "hidden";      // "hidden" | "choosing" | "locked"
   let submitting = false, confirmed = false;
+  let suggested = null;
 
   const list = $("personList");
+  const joinTracks = $("personJoinTracks");
+  const groupList = $("personGroups");
+  const groupNext = $("personGroupNext");
+  const confirmButton = $("personConfirm");
+  joinTracks.addEventListener("change", () => {
+    if (!joinTracks.checked) {
+      for (const group of groups) group.forEach(index => selected.add(index));
+      groups.length = 0;
+    }
+    setError("");
+    syncChoosing();
+    emitSelection();
+  });
+
+  function emitSelection() {
+    bus.emit("person:selection", { selected: [...groups.flat(), ...selected], previewIndex });
+  }
 
   function thumb(i, cls) {
     const box = el("span", cls);
@@ -72,20 +91,56 @@ export function initPersonSelect(bus) {
   }
 
   function syncChoosing() {
+    const busy = submitting || confirmed;
+    const joining = joinTracks.checked;
+    const assignment = new Map();
+    groups.forEach((group, number) => group.forEach(index => assignment.set(index, number + 1)));
+    joinTracks.disabled = busy;
+    show("personJoinRow", candidates.length > 1);
+    show("personJoinHelp", joining);
+    show(groupList, groups.length > 0);
+    groupList.replaceChildren(...groups.map((group, index) => {
+      const button = el("button", "btn-secondary");
+      button.type = "button";
+      button.disabled = busy;
+      setText(button, m("person.group_chip", { number: index + 1, count: group.length }));
+      setAttr(button, "aria-label", m("person.group_undo", { number: index + 1 }));
+      button.addEventListener("click", () => {
+        groups.splice(index, 1);
+        if (!selected.size) group.forEach(fragment => selected.add(fragment));
+        setError("");
+        syncChoosing();
+        emitSelection();
+      });
+      return button;
+    }));
+    show(groupNext, joining);
+    groupNext.disabled = busy || !selected.size;
+    setText(groupNext, m("person.group_add", { number: groups.length + 1 }));
     rows.forEach(({ btn, tag }, i) => {
-      const checked = selected.has(i);
+      const checked = selected.has(i) || assignment.has(i);
       btn.classList.toggle("selected", checked);
       btn.setAttribute("aria-pressed", String(checked));
-      btn.disabled = submitting || confirmed;
-      setText(tag, i === previewIndex ? m("person.previewing") : i === defaultIdx ? m("common.recommended") : "");
+      btn.disabled = busy;
+      setText(tag, assignment.has(i) ? m("person.group_assigned", { number: assignment.get(i) })
+        : i === previewIndex ? m("person.previewing") : i === defaultIdx ? m("common.recommended") : "");
       show(tag, !!tag.textContent);
     });
-    setText($("personCount"), m("person.selection_help", { detected: candidates.length, selected: selected.size }));
-    const btn = $("personConfirm");
-    btn.disabled = !selected.size || submitting || confirmed;
-    setText(btn, submitting ? m("job.submitting") : confirmed ? m("person.confirmed")
+    const acceptsSuggestion = joining && !groups.length && suggested?.length === selected.size
+      && suggested.every(i => selected.has(i));
+    let countText = m("person.selection_help", { detected: candidates.length, selected: selected.size });
+    if (acceptsSuggestion) countText = m("person.join_suggestion", { count: selected.size });
+    else if (joining) {
+      countText = assignment.size === candidates.length
+        ? m("person.group_ready", { count: groups.length })
+        : m("person.group_step", { number: groups.length + 1, count: selected.size });
+    }
+    setText($("personCount"), countText);
+    confirmButton.disabled = busy || (!selected.size && !groups.length);
+    setText(confirmButton, submitting ? m("job.submitting") : confirmed ? m("person.confirmed")
+      : groups.length ? m("person.group_generate", { count: groups.length + Number(selected.size > 0) })
       : !selected.size ? m("person.check") : selected.size === 1 ? m("person.confirm_one", { number: selected.values().next().value + 1 })
-      : m("person.confirm_multiple", { count: selected.size }));
+      : m(joining ? "person.confirm_join" : "person.confirm_multiple", { count: selected.size }));
   }
 
   function renderLocked(job, candidate) {
@@ -97,7 +152,7 @@ export function initPersonSelect(bus) {
     const chip = el("span", "person-dot");
     chip.style.background = "#10b981";
     name.append(chip, el("span", "", m("person.number", { number: lockedIndex + 1 })));
-    const how = m(job.selection_auto ? "person.chosen_auto" : "person.chosen_manual");
+    const how = m(job.track_fragments?.length ? "person.joined" : job.selection_auto ? "person.chosen_auto" : "person.chosen_manual");
     text.append(name, el("span", "person-meta", how));
     if (candidate) text.append(el("span", "person-meta num",
       m("person.track", { frames: candidate.num_frames, start: candidate.start + 1, end: candidate.end + 1 })));
@@ -108,23 +163,36 @@ export function initPersonSelect(bus) {
 
   function togglePerson(i) {
     if (mode !== "choosing" || submitting || confirmed || !candidates[i]) return;
-    if (selected.has(i)) selected.delete(i); else selected.add(i);
+    if (!groups.some(group => group.includes(i))) {
+      if (selected.has(i)) selected.delete(i); else selected.add(i);
+    }
+    setError("");
     previewIndex = i;
     syncChoosing();
-    bus.emit("person:selection", { selected: [...selected], previewIndex });
+    emitSelection();
   }
 
-  $("personConfirm").addEventListener("click", async () => {
-    if (!selected.size || !jobId || mode !== "choosing" || submitting || confirmed) return;
+  async function submit(addPerson) {
+    if (!jobId || mode !== "choosing" || submitting || confirmed) return;
+    if (!selected.size && (addPerson || !groups.length)) return;
     const id = jobId;
+    const draft = [...selected];
     submitting = true;
     setError("");
     syncChoosing();
     try {
-      const result = await api.selectPeople(id, [...selected]);
-      if (jobId !== id) return;
-      confirmed = true;
-      bus.emit("person:confirmed", result.people ?? [...selected]);
+      const result = groups.length || addPerson
+        ? await api.selectPersonGroups(id, draft.length ? [...groups, draft] : groups, addPerson)
+        : await api.selectPeople(id, draft, joinTracks.checked && draft.length > 1);
+      if (jobId !== id || mode !== "choosing") return;
+      if (addPerson) {
+        groups.push(draft);
+        selected.clear();
+        emitSelection();
+      } else {
+        confirmed = true;
+        bus.emit("person:confirmed", result.people);
+      }
     } catch (e) {
       if (jobId === id && mode === "choosing") setError(e.message ? e : m("person.choose_failed"));
     } finally {
@@ -133,7 +201,10 @@ export function initPersonSelect(bus) {
         if (mode === "choosing") syncChoosing();
       }
     }
-  });
+  }
+
+  groupNext.addEventListener("click", () => submit(true));
+  confirmButton.addEventListener("click", () => submit(false));
 
   function setError(msg) {
     setText($("personError"), msg);
@@ -147,6 +218,9 @@ export function initPersonSelect(bus) {
     setText($("personTitle"), m(next === "locked" ? "person.reconstructing" : "person.choose"));
     show("personConfirm", next === "choosing");
     show("personCount", next === "choosing");
+    if (next !== "choosing") {
+      for (const control of ["personJoinRow", "personJoinHelp", groupList, groupNext]) show(control, false);
+    }
     if (next !== "locked") show("personReselect", false);
     show(card, next !== "hidden");
     if (next === "choosing") renderChoosing();
@@ -166,21 +240,33 @@ export function initPersonSelect(bus) {
         candidates = [];
         defaultIdx = previewIndex = lockedIndex = null;
         selected.clear();
+        groups.length = 0;
         submitting = confirmed = false;
+        suggested = null;
+
+        joinTracks.checked = false;
         setError("");
       }
       if (job.status === "waiting_user" && cands.length) {
         if (mode !== "choosing" || changedJob) {
           candidates = cands;
           previewIndex = defaultIdx = job.default_person ?? 0;
+          suggested = Array.isArray(job.suggested_join) && job.suggested_join.length >= 2
+            ? job.suggested_join : null;
+          if (suggested) {
+            suggested.forEach(index => selected.add(index));
+            previewIndex = suggested[0];
+            joinTracks.checked = true;
+          }
           setMode("choosing", job);
-          bus.emit("person:candidates", { candidates, selected: [], previewIndex });
+          bus.emit("person:candidates", { candidates, selected: [...selected], previewIndex });
         }
       } else if (job.selected_person != null) {
         const changed = mode !== "locked" || lockedIndex !== job.selected_person;
         lockedIndex = job.selected_person;
         if (changed) {
-          const candidate = candidates[lockedIndex] ?? cands[lockedIndex] ?? job.person_track;
+          const candidate = job.track_fragments?.length ? job.person_track
+            : candidates[lockedIndex] ?? cands[lockedIndex] ?? job.person_track;
           setError("");
           setMode("locked", job, candidate);
           bus.emit("person:locked", { candidate, index: lockedIndex });
@@ -199,7 +285,11 @@ export function initPersonSelect(bus) {
     reset() {
       jobId = null; candidates = []; defaultIdx = previewIndex = lockedIndex = null;
       selected.clear();
+      groups.length = 0;
       submitting = confirmed = false;
+      suggested = null;
+
+      joinTracks.checked = false;
       setError("");
       setMode("hidden");
       bus.emit("person:candidates", { candidates: [], selected: [], previewIndex: null });

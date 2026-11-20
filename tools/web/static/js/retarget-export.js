@@ -2,6 +2,7 @@ import { AnimationClip, Group, InterpolateDiscrete, MeshStandardMaterial, Quater
 import { createFbxCharacterRetarget } from "./fbx-character-retarget.js";
 import { GLTFExporter } from "../vendor/three/vrm/GLTFExporter.js";
 import { appError } from "./i18n.js";
+import { sceneActorVisible, scenePlacement } from "./frame-sample.js";
 
 // Bake the same target transforms evaluated in the viewport, including
 // positional offsets and the assigned IK controller tracks. Use independent
@@ -15,14 +16,16 @@ export async function bakeRetargetGlb(actors, stem, signal) {
   try {
     for (const actor of actors) {
       signal?.throwIfAborted();
-      const { asset, motion, poseOffsets, offset, yaw, start, frames, fps }=actor;
+      const { asset, motion, poseOffsets, offset, yaw, start, frames, fps,
+        sceneTrack = { offset, yaw }, sourceStart = 0 }=actor;
       if (!Number.isInteger(start) || start < 0 || !Number.isInteger(frames) || frames < start+motion.frames ||
           !Number.isFinite(fps) || fps <= 0) throw appError("retarget.export_failed");
       const root=asset.clone();
       applications.push([asset,root]);
       const placement=new Group();
-      placement.position.fromArray(offset);
-      placement.rotation.y=yaw;
+      const initial = scenePlacement(sceneTrack, sourceStart);
+      placement.position.fromArray(initial.offset);
+      placement.rotation.y=initial.yaw;
       placement.add(root);scene.add(placement);
       const rig=createFbxCharacterRetarget(root,asset,motion,{poseOffsets});
       const targets=asset.getRig(root);
@@ -50,12 +53,22 @@ export async function bakeRetargetGlb(actors, stem, signal) {
       allocated+=count;
       const time=Float32Array.from({length:frames},(_,i)=>i/fps);
       const data=nodes.map((node)=>({node, position:new Float32Array(frames*3), rotation:new Float32Array(frames*4)}));
-      const visibilityFrames = Array.from(new Set([0,Math.max(0,start),
-        Math.min(frames-1,start+motion.frames),frames-1])).sort((a,b)=>a-b);
+      const visibility = sceneTrack.visible_ranges?.flatMap(([a,b]) => [a-sourceStart,b-sourceStart])
+        ?? [start,start+motion.frames];
+      const visibilityFrames = Array.from(new Set([0,...visibility.filter(f => f >= 0 && f < frames),frames-1])).sort((a,b)=>a-b);
       // glTF has no visibility track. Scale to zero at the same entry/exit
       // frames for rigs that are not active throughout a group shot.
       const scale=new VectorKeyframeTrack(placement.uuid+".scale",visibilityFrames.map((f)=>f/fps),
-        visibilityFrames.flatMap((f)=>Array(3).fill(f>=start && f<start+motion.frames ? 1 : 0)),InterpolateDiscrete);
+        visibilityFrames.flatMap((f)=>Array(3).fill(f>=start && f<start+motion.frames
+          && sceneActorVisible(sceneTrack, f+sourceStart) ? 1 : 0)),InterpolateDiscrete);
+      if (sceneTrack.placements?.length > 1) {
+        const positions = [initial, ...sceneTrack.placements.filter(row => row.start > sourceStart)];
+        const times = positions.map((row,index) => index ? (row.start-sourceStart)/fps : 0);
+        clips.push(new VectorKeyframeTrack(placement.uuid+".position",times,
+          positions.flatMap(row => row.offset),InterpolateDiscrete),
+        new QuaternionKeyframeTrack(placement.uuid+".quaternion",times,
+          positions.flatMap(({ yaw }) => [0,Math.sin(yaw/2),0,Math.cos(yaw/2)]),InterpolateDiscrete));
+      }
       const last=motion.frames-1;
       let nextYield=performance.now()+25;
       for(let f=0;f<frames;f++){

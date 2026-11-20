@@ -6,16 +6,16 @@
 
 **[Télécharger l’édition portable pour Windows](https://github.com/xiaoerofficial021-collab/FlowHMR-Windows/releases/latest/download/FlowHMR-Windows.zip)** · [Notes de version](https://github.com/xiaoerofficial021-collab/FlowHMR-Windows/releases/latest) · [Article FlowHMR](https://arxiv.org/abs/2610.03691)
 
-## Nouveautés de la v0.3.6
+## Nouveautés de la v0.3.7
 
-- **Reciblage personnalisé et préréglages.** Sélectionnez les os en 3D dans un panneau flottant et redimensionnable. Le guide couvre le corps puis les deux mains, avec la symétrie activée par défaut. Le reciblage tient compte de la taille et de la longueur des membres. Les personnages et les préréglages sont enregistrés et accessibles par vignettes.
-- **Export vers le personnage actuel.** Mixamo et MetaHuman n’exigent plus de choisir à nouveau un fichier modèle. L’export vers un personnage conserve le reciblage et les corrections enregistrés. Le squelette générique reste disponible pour Mixamo. Les PMX compatibles proposent IK et FK. Le choix automatique de l’os racine privilégie « センター », puis « 全ての親 ». Après le reciblage d’un FBX personnalisé, choisissez « FBX du personnage actuel » pour retrouver le squelette d’origine, avec ou sans maillage. Le FBX du personnage actuel s’exporte une personne à la fois tout en conservant sa position et son instant d’entrée dans une scène à plusieurs. Les exports GLB et VRMA restent disponibles pour les VRM.
-- **Le VMD générique reprend les corrections du personnage.** Après avoir appliqué un personnage, l’export conserve les corrections de rotation et de translation, les réglages de la racine et le mode IK/FK des pieds, avec les noms d’os MMD standard. Pour garder les proportions exactes et le contact des semelles, choisissez l’export vers le PMX actuel.
-- **Lecture ralentie plus fluide.** La fréquence d’affichage de la chronologie se règle et se mémorise. Le ralenti interpole les poses intermédiaires sans modifier la synchronisation ni le minutage de l’export.
-- **AMD Radeon RX 6000 (expérimental).** Sous Windows 11, l’application propose un environnement ROCm adapté à l’architecture du GPU. Les paquets ont été vérifiés ; la capture complète reste à tester sur une carte RX 6000.
-- **Compatibilité MCP.** Les 19 outils existants et les options d’export en arrière-plan restent compatibles. MCP peut commuter l’IK des FBX/VRM personnalisés dont les contrôleurs sont assignés et indiquer le moteur de calcul actif. L’export qui intègre les corrections du personnage se fait dans l’application de bureau.
+- **Mise à jour de la version portable.** Ouvrez la vérification des mises à jour dans la barre supérieure pour lire les notes et installer la mise à jour. Vous pouvez aussi importer le ZIP portable officiel.
+- **Reconstruction de la caméra (expérimentale).** Après la génération du mouvement, retrouvez, prévisualisez ou recalculez la caméra d’origine. Exportez la caméra associée en FBX, VMD ou NPZ. Le calcul prend en compte les déplacements et les zooms. GeoCalib aide à estimer l’inclinaison du sol.
+- **Jonction par personne et alignement de scène (expérimentaux).** Réunissez les fragments d’une même personne sur une seule piste ou confirmez plusieurs personnes dans l’ordre pour les aligner dans une même scène. Les transitions des bras sont limitées aux raccords dont la pose est observable dans la vidéo.
+- **Optimisation du mouvement du torse.** Désactivée par défaut. Une génération supplémentaire avec FlowHMR base recalcule les rotations du bassin, de la colonne vertébrale, du cou et de la tête. Les positions et orientations des pieds du résultat standard servent de cibles.
+- **Modèles à la demande.** Le panneau des modèles permet de télécharger séparément SAM 2.1 (suivi expérimental lors des croisements), FlowHMR base et GeoCalib.
+- **Aperçu à distance et MCP.** Réduction du scintillement de certains personnages vus de loin. MCP peut lancer, interroger ou arrêter le calcul de la caméra et exporter les mouvements avec la caméra associée.
 
-[Notes de version complètes](../release-windows.md) · [Version précédente : v0.3.5](../release-windows-v0.3.5.md)
+[Notes de version complètes](../release-windows.md) · [Version précédente : v0.3.6](../release-windows-v0.3.6.md)
 
 ## Configuration requise et matériel compatible
 

@@ -129,7 +129,7 @@ function validateBinding(vmd, rest) {
   return { tracks, iks, hasRoot: used.has(vmd.rootBoneIndex) };
 }
 
-function timeline(frameCount, fps, startFrame, sceneEndFrame) {
+function timeline(frameCount, fps, startFrame, sceneEndFrame, visibleRanges) {
   const valid = (frame) => Number.isSafeInteger(frame) && frame >= 0 && frame <= UINT32_MAX;
   if (fps !== 30 || !valid(startFrame) || !Number.isSafeInteger(frameCount) || frameCount < 1) {
     fail("timeline", "PMX VMD requires a nonempty motion on a 30 FPS timeline.");
@@ -143,9 +143,18 @@ function timeline(frameCount, fps, startFrame, sceneEndFrame) {
     display.set(0, false);
     display.set(startFrame - 1, false);
   }
-  display.set(startFrame, true);
+  const ranges = visibleRanges ?? [[startFrame, end + 1]];
+  display.set(startFrame, false);
+  for (const [start, stop] of ranges) {
+    if (start > startFrame) display.set(start - 1, false);
+    display.set(start, true);
+    if (stop <= end) {
+      display.set(stop - 1, true);
+      display.set(stop, false);
+    }
+  }
   if (sceneEndFrame != null && end < sceneEndFrame) {
-    display.set(end, true);
+    display.set(end, ranges.some(([, stop]) => stop === end + 1));
     display.set(end + 1, false);
   }
   // Adjacent boundary keys avoid one long transition in importers that interpolate display.
@@ -175,13 +184,15 @@ function abortIfNeeded(signal) {
 // zero based, with an inclusive end. The solver composes the optional scene placement.
 export async function encodePmxVmd({
   solver, rest, modelName = "", frameCount, fps = 30, startFrame = 0,
-  sceneEndFrame = null, placement = null, onProgress, signal,
+  sceneEndFrame = null, placement = null, visibleRanges = null, onProgress, onSample, signal,
 }) {
   abortIfNeeded(signal);
-  const display = timeline(frameCount, fps, startFrame, sceneEndFrame);
+  const display = timeline(frameCount, fps, startFrame, sceneEndFrame, visibleRanges);
   const vmd = solver?.vmd;
   const { tracks, iks, hasRoot } = validateBinding(vmd, rest);
-  const transform = actorPlacement(placement, hasRoot);
+  const constantPlacement = typeof placement === "function" ? undefined : actorPlacement(placement, hasRoot);
+  const transform = typeof placement === "function" ? frame => actorPlacement(placement(frame), hasRoot)
+    : () => constantPlacement;
   const keyCount = frameCount * tracks.length;
   const length = HEADER_BYTES + keyCount * BONE_BYTES + 20 +
     display.size * (PROPERTY_BYTES + iks.length * IK_BYTES);
@@ -208,9 +219,10 @@ export async function encodePmxVmd({
     abortIfNeeded(signal);
     qs.fill(NaN);
     ts.fill(NaN);
-    if (!vmd.sample(f, qs, ts, transform)) {
+    if (!vmd.sample(f, qs, ts, transform(f))) {
       fail("pose", `The PMX solver could not produce frame ${f + 1}.`);
     }
+    onSample?.(f);
     for (let b = 0; b < tracks.length; b++) {
       const p = b * 3, q = b * 4;
       const x = ts[p], y = ts[p + 1], z = ts[p + 2];

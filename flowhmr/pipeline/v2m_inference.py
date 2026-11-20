@@ -216,6 +216,9 @@ def _limit_track_frames(bbox_path: str, max_frames: int | None,
     payload["unclipped_start_end"] = np.asarray(full_range, dtype=np.int64)
     payload["bbox"] = full_bbox[start - full_start:end - full_start + 1]
     payload["start_end"] = np.array([start, end], dtype=np.int64)
+    if "observed_frames" in payload:
+        observed = payload.setdefault("unclipped_observed_frames", payload["observed_frames"])
+        payload["observed_frames"] = observed[(observed >= start) & (observed <= end)]
     # SAM features depend on both the selected range and the camera intrinsics.
     for path in dependent_paths:
         if os.path.exists(path):
@@ -1110,7 +1113,8 @@ class V2MInferenceEngine:
                       details_callback: Callable[[dict], None] = None,
                       sam2_mask_payload: dict | None = None,
                       sam2_identity_objects=None,
-                      prepared_inputs: bool | None = None) -> str:
+                      prepared_inputs: bool | None = None,
+                      prepared_inputs_dir: Path | None = None) -> str:
         """Video -> SMPL-H motion.
 
         static_camera: skip VGGT and use a fixed pose with default intrinsics.
@@ -1205,7 +1209,7 @@ class V2MInferenceEngine:
         ))
 
         prepared = None
-        prepared_dir = Path(sub_dir) / "sam2_inputs"
+        prepared_dir = prepared_inputs_dir if prepared_inputs_dir is not None else Path(sub_dir) / "sam2_inputs"
         if prepared_inputs is not False and (prepared_dir / "manifest.json").is_file():
             from flowhmr.utils.sam2_person_inputs import load_person_inputs
 
@@ -1283,7 +1287,7 @@ class V2MInferenceEngine:
                 try:
                     result = self.proc.detect_and_track(working_video, start_frame=start_frame, end_frame=last_requested,
                                                         on_progress=on_detected, cancel_check=cancel_check,
-                                                        sam2_identity_objects=sam2_identity_objects)
+                                                        sam2_identity_objects=sam2_identity_objects, find_shots=True)
                 finally:
                     self.release_stage()
             if result.total_frames != video_meta.total_frames:
@@ -1296,16 +1300,20 @@ class V2MInferenceEngine:
                 track_idx = -1
                 print(f"  [bbox] WARN no_tracks -> full-image bbox x {result.total_frames} frames")
             else:
-                # Prepared identities are ordered left-to-right by the crossing
-                # runner; area is inflated by held body boxes, so it must not
-                # decide the recommended person here.
-                track_idx = 0 if prepared is not None else VideoProcessor.select_best_track(result)
                 # Fragments shorter than this (ByteTrack id switches, passers-by) are not offered.
                 # Scale it for short trims so a second person can still be chosen.
                 scanned_start, scanned_end = result.scanned_range
                 min_len = min(15, (scanned_end - scanned_start) // 2 + 1)
+                from flowhmr.utils.track_fragments import propose_edited_track, review_track_identities
+                check = cancel_check or (lambda: None)
+                appearances = {}
+                if len(result.shots) > 1:
+                    _pcb(StageName.DETECTION, 64, "Checking continuity across cuts")
+                    appearances = review_track_identities(working_video, result, min_len, check)
+                # Prepared identities keep the mainline's left-to-right recommendation.
+                track_idx = 0 if prepared is not None else VideoProcessor.select_best_track(result)
                 offered = [i for i, t in enumerate(result.tracks) if t.length >= min_len or i == track_idx]
-                if person_selector is not None and len(offered) > 1:
+                if len(offered) > 1:
                     candidates = []
                     for i in offered:
                         t = result.tracks[i]
@@ -1321,11 +1329,23 @@ class V2MInferenceEngine:
                             "frames": t.frames[order].astype(int).tolist(),
                             "boxes": np.round(t.bboxes[order].astype(np.float64), 1).tolist(),
                         })
-                    _pcb(StageName.DETECTION, 70, "Waiting for person selection")
-                    default_pos = offered.index(track_idx)
-                    chosen = person_selector(result, candidates, default_pos)
-                    if chosen is not None and 0 <= int(chosen) < len(offered):
-                        track_idx = offered[int(chosen)]
+                    result.edited_track = propose_edited_track(
+                        working_video, candidates, result.scanned_range, check,
+                        shots=result.shots, appearances=appearances,
+                    )
+                    if person_selector is not None:
+                        _pcb(StageName.DETECTION, 70, "Waiting for person selection")
+                        default_pos = offered.index(track_idx)
+                        chosen = person_selector(result, candidates, default_pos)
+                        if chosen is not None and 0 <= int(chosen) < len(offered):
+                            track_idx = offered[int(chosen)]
+                    elif result.edited_track is not None:
+                        joined = result.edited_track
+                        VideoProcessor.replace_joined_track(result, joined)
+                        track_idx = joined["track_index"]
+                        _details(selected_person=joined["index"], selection_auto=True,
+                                 person_track={key: joined[key] for key in ("track_id","num_frames","start","end")},
+                                 track_fragments=joined["source_tracks"])
                 track = result.tracks[track_idx]
                 print(f"  [bbox] track {track.track_id}: length={track.length} "
                       f"frame_range=[{int(track.frames.min())},{int(track.frames.max())}] "
@@ -1346,18 +1366,65 @@ class V2MInferenceEngine:
             dependent_paths=dependent_paths,
         )
 
+        with np.load(bbox_npz_path) as data:
+            start_end_arr = data["start_end"].astype(np.int64)
+            shot_ranges = data.get("shot_ranges")
+            detected_frames = data.get("observed_frames")
+            s, e = map(int, start_end_arr)
+            if "fragment_frames" in data:
+                from flowhmr.multishot.stitch_motion import fragment_inputs, generate_fragments
+
+                parts = fragment_inputs(data, s, e, video_meta.width, video_meta.height)
+            else:
+                parts = []
+
+        if parts:
+            from flowhmr.multishot.motion_condition import observed_motion_frames, track_shots
+            from flowhmr.multishot.timeline import intervals
+
+            longest = max(end - start + 1 for start, end, *_ in parts)
+            _details(track_range=[s, e], long_motion_frames=(
+                longest if longest > LONG_MOTION_EXPERIMENTAL_THRESHOLD else None))
+            options = dict(seed=seed, cfg_scale=cfg_scale, smoothing_frames=smoothing_frames,
+                           hamer=hamer, hamer_stride=hamer_stride, vggt_frame_interval=vggt_frame_interval,
+                           static_camera=static_camera, sam_chunk_size=sam_chunk_size,
+                           sam_hand_stride=sam_hand_stride, cancel_check=cancel_check)
+            shots = track_shots(shot_ranges, s, e) or [dict(id=0,start=0,end=e-s+1)]
+            cuts = [s+shot['start'] for shot in shots[1:]]
+            report = generate_fragments(self, video_path, working_video, sub_dir, video_name, parts, s, e,
+                options=options, prepared_dir=prepared_dir if prepared is not None else None,
+                prepared_key=prepared[2]['run_id'] if prepared is not None else None, cuts=cuts,
+                notify=lambda index, count: _pcb(StageName.GENERATION, (index-1)*90/count,
+                                                 f"正在独立生成片段 {index}/{count}"))
+            observed, usable = observed_motion_frames(detected_frames, s, e-s+1)
+            _details(fragment_stitching=report, shot_linking_report=dict(
+                tracks=[{**shot,"start":s+shot["start"],"end":s+shot["end"]} for shot in shots],
+                direct_pose_frames=int(observed.sum()),
+                unobserved_source_ranges=[[s+a,s+b] for a,b in intervals(~usable)],
+            ))
+            _pcb(StageName.GENERATION, 100, "片段接续完成")
+            return sub_dir
+
         # ==== Step 2: Camera ====
         print(f"\n  === Step 2: {'Static' if static_camera else 'VGGT'} Camera ===")
         _pcb(StageName.CAMERA, 0, "Using a static camera" if static_camera else "Starting VGGT camera extraction")
-
-        with np.load(bbox_npz_path) as data:
-            start_end_arr = data["start_end"].astype(np.int64)
-        s, e = int(start_end_arr[0]), int(start_end_arr[1])
         t_track = e - s + 1
         if prepared is not None:
             from flowhmr.utils.sam2_person_inputs import mask_stream_for_bbox
 
             sam2_masks, _ = mask_stream_for_bbox(prepared_dir, bbox_npz_path, working_video)
+
+        from flowhmr.multishot.motion_condition import observed_motion_frames, track_shots
+
+        shots = track_shots(shot_ranges, s, e)
+        can_observe = getattr(self.sam_extractor, "estimator", None) is not None
+        edited_track = len(shots) > 1 and can_observe
+        record_observations = edited_track
+        if edited_track:
+            tracked = np.arange(s, e + 1) if detected_frames is None else detected_frames
+            observed, usable = observed_motion_frames(tracked, s, t_track)
+        if record_observations:
+            from flowhmr.multishot.runtime import save_npz
         long_motion_frames = t_track if t_track > LONG_MOTION_EXPERIMENTAL_THRESHOLD else None
         _details(track_range=[s, e], long_motion_frames=long_motion_frames)
         if long_motion_frames:
@@ -1365,11 +1432,40 @@ class V2MInferenceEngine:
 
         from flowhmr.utils.runtime_vggt_camera import (
             camera_intervals, extract_vggt_camera, extract_vggt_camera_isolated,
-            make_static_camera, _vggt_opencv_to_yup_rt,
+            make_static_camera, _vggt_opencv_to_yup_rt, VGGTCameraResult,
         )
 
         camera_stamp = os.stat(camera_npz_path).st_mtime_ns if os.path.exists(camera_npz_path) else None
-        if static_camera:
+        if edited_track:
+            from flowhmr.multishot.runtime import estimate_shot_cameras
+            from flowhmr.multishot.timeline import intervals
+
+            hw = (video_meta.height, video_meta.width)
+            camera_options = {"params": {"static_camera": static_camera, "vggt_interval": vggt_frame_interval}}
+            raw_rt, K, _ = estimate_shot_cameras(
+                Path(output_dir), camera_options, shots, s, t_track, hw, working_video, self.device,
+                cancel_check or (lambda: None), lambda msg, pct: _pcb(StageName.CAMERA, pct * 4, msg),
+                self._release_camera_cuda,
+            )
+            camera_result = VGGTCameraResult(raw_rt, raw_rt, K, hw)
+            same = False
+            if camera_stamp is not None:
+                try:
+                    with np.load(camera_npz_path, allow_pickle=False) as saved:
+                        same = (np.array_equal(saved.get("shot_ranges"), shot_ranges)
+                                and np.array_equal(saved.get("camera_RT"), raw_rt)
+                                and np.array_equal(saved.get("K"), K))
+                except (ValueError, OSError):
+                    pass
+            if not same:
+                save_npz(camera_npz_path, camera_RT=raw_rt, RT=raw_rt, K=K, image_size_hw=np.array(hw),
+                         frame_range=np.array([s,e]), shot_ranges=shot_ranges, k_space="original_frame")
+            _details(shot_linking_report=dict(
+                tracks=[{**row, "start":s+row["start"], "end":s+row["end"]} for row in shots],
+                direct_pose_frames=int(observed.sum()),
+                unobserved_source_ranges=[[s+a,s+b] for a,b in intervals(~usable)],
+            ))
+        elif static_camera:
             camera_result = make_static_camera(
                 (video_meta.height, video_meta.width), frame_range=(s, e), output_npz=camera_npz_path,
             )
@@ -1403,6 +1499,8 @@ class V2MInferenceEngine:
         _pcb(StageName.FEATURE_EXTRACT, 0, "Starting SAM extraction")
 
         feature_cached = False
+        observations_path = Path(feat_pt_path + ".observations.npz")
+        body_observations = None
         if os.path.exists(feat_pt_path):
             try:
                 cached_tokens = torch.load(feat_pt_path, map_location="cpu", weights_only=True)
@@ -1437,6 +1535,20 @@ class V2MInferenceEngine:
             if feature_cached and cached_batch.get("backend", "gpu") != self.sam_cache_backend:
                 print("  [sam] backend changed, recomputing features and hand boxes", flush=True)
                 feature_cached = False
+        if feature_cached and record_observations:
+            try:
+                with np.load(observations_path, allow_pickle=False) as saved:
+                    orientation = saved["orientation"]
+                    points = saved["points"]
+                    if (orientation.shape == (t_track,3,3) and np.isfinite(orientation[observed]).all()
+                            and points.shape == (t_track,70,3)
+                            and np.array_equal(saved["K"], camera_result.K)
+                            and np.array_equal(saved["source_frames"], np.arange(s, e + 1))
+                            and "boxes" in saved):
+                        body_observations = orientation
+            except (OSError, ValueError, KeyError):
+                pass
+            feature_cached = body_observations is not None
         need_hand_boxes = hamer and load_hand_boxes(hand_boxes_path, t_track) is None
         if feature_cached:
             batch = {"requested": sam_chunk_size, "actual": min(t_track, sam_chunk_size) if sam_chunk_size else None,
@@ -1559,6 +1671,9 @@ class V2MInferenceEngine:
                 box_chunks = []
                 if extract_hand_boxes is not None:
                     sam_args["hand_boxes_out"] = box_chunks
+                observation_chunks = []
+                if record_observations:
+                    sam_args["observations_out"] = observation_chunks
                 tokens = self.sam_extractor.extract_video_tokens(working_video, token_dim=3072, **sam_args)
                 tokens = tokens.contiguous().cpu().to(torch.float32)
                 if tokens.shape != (t_track, 3072):
@@ -1567,6 +1682,13 @@ class V2MInferenceEngine:
                         f"expected ({t_track}, 3072); incomplete features were not cached."
                     )
                 hand_boxes = np.concatenate(box_chunks) if box_chunks else None
+                if record_observations:
+                    points = np.concatenate([row["points"] for row in observation_chunks])
+                    body_observations = np.concatenate([row["orientation"] for row in observation_chunks])
+                    if points.shape != (t_track,70,3) or body_observations.shape != (t_track,3,3):
+                        raise ValueError("SAM body observations do not match the selected track")
+                    save_npz(observations_path, points=points, orientation=body_observations,
+                             boxes=bbox_track, K=camera_result.K, source_frames=np.arange(s,e+1))
             if hand_boxes is not None:
                 if hand_boxes.shape != (t_track, 2, 4):
                     raise ValueError("SAM hand boxes do not match the selected track")
@@ -1601,9 +1723,15 @@ class V2MInferenceEngine:
         assert T == expected_len, f"sam_tokens.shape[0]={T} != expected {expected_len}"
         print(f"  [gen] T={T}, range=[{s},{e}], seed={seed}, cfg={cfg_scale}")
 
-        camera_RT = _vggt_opencv_to_yup_rt(
-            torch.from_numpy(camera_result.camera_RT).to(torch.float32),
-        )
+        conditioning_camera = camera_result.camera_RT
+        if edited_track and not usable.all():
+            from flowhmr.multishot.motion_condition import fill_hidden_features
+
+            fill_hidden_features(sam_tokens, usable)
+        if edited_track:
+            from flowhmr.multishot.motion_condition import joined_motion_camera
+            conditioning_camera = joined_motion_camera(conditioning_camera, body_observations, observed, usable, shots)
+        camera_RT = _vggt_opencv_to_yup_rt(torch.from_numpy(conditioning_camera).to(torch.float32))
         feature_dict = build_feature_dict(sam_tokens, camera_RT, self.device)
 
         with torch.no_grad():

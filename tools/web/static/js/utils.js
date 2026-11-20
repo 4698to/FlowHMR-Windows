@@ -13,6 +13,23 @@ export function el(tag, className, text) {
   return node;
 }
 
+export function safeStem(filename) {
+  return (filename || 'FlowHMR').replace(/\.[^.]+$/, '').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 100);
+}
+
+export function downloadFile(href, filename = '') {
+  const link = document.createElement('a');
+  link.href = href;
+  link.download = filename;
+  link.click();
+}
+
+export function downloadBlob(blob, filename) {
+  const href = URL.createObjectURL(blob);
+  downloadFile(href, filename);
+  setTimeout(() => URL.revokeObjectURL(href), 60_000);
+}
+
 export function formatSeconds(s) {
   if (s == null || !isFinite(s)) return "";
   if (s < 60) return `${s.toFixed(1)}s`;

@@ -199,6 +199,7 @@ export function initPreview(bus) {
     } else if (tracks.length) {
       for (const track of tracks) {
         if (f < track.start || f > track.end) continue;
+        if (track.unobserved_source_ranges?.some(([start,end]) => start <= f && f < end)) continue;
         const b = track.boxes[f - track.start];
         if (b) drawBox(L, b, track.person ? personColor(track.person - 1) : "#10b981",
           track.person ? `#${track.person}` : locked ? `#${locked.index + 1} ✓` : null, true);

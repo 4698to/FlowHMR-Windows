@@ -1,6 +1,6 @@
 # MCP 服务
 
-FlowHMR 提供本机 Streamable HTTP MCP 服务。Agent 可以导入视频、调整生成参数、查询任务、导出动作，以及控制桌面预览和角色骨骼。
+FlowHMR 提供本机 Streamable HTTP MCP 服务。Agent 可以导入视频、调整生成参数、查询任务、导出动作和配套相机，以及控制桌面预览和角色骨骼。
 
 ## 启动和连接
 
@@ -40,6 +40,9 @@ MCP 创建的任务会显示在桌面任务历史中。队列、任务进度、�
 | `flowhmr_rerun_job` | 使用新参数创建重跑任务 |
 | `flowhmr_cancel_job` | 请求取消排队中或运行中的任务 |
 | `flowhmr_prepare_scene` | 为需要对齐的多人结果创建场景 |
+| `flowhmr_prepare_camera` | 请求恢复原片机位，可用 `force` 重算 |
+| `flowhmr_get_camera_status` | 查询当前相机状态，可返回报告和覆盖范围 |
+| `flowhmr_cancel_camera` | 停止相机反求，保留已经生成的动作和上次可用机位 |
 | `flowhmr_export_motion` | 提交 FBX、VMD、VRMA 或 NPZ 导出 |
 | `flowhmr_get_export` | 查询导出状态和文件信息 |
 | `flowhmr_import_character` | 导入 PMX、VRM 或带蒙皮的 FBX 角色 |
@@ -50,6 +53,12 @@ MCP 创建的任务会显示在桌面任务历史中。队列、任务进度、�
 | `flowhmr_get_viewer_snapshot` | 读取界面当前帧、播放状态和预览骨架 |
 | `flowhmr_get_motion_keyframes` | 读取原始 SMPL-H 动作的逐帧数据 |
 | `flowhmr_control_playback` | 控制界面跳帧、播放和暂停 |
+
+## 配套相机（实验性）
+
+动作完成后，用 `flowhmr_prepare_camera` 发起反求。多人任务先通过 `flowhmr_prepare_scene` 完成场景对齐。用 `flowhmr_get_camera_status` 查询进度、画面质量和覆盖范围。需要逐镜头详情时，传入 `include_report: true`。
+
+`flowhmr_export_motion` 的 `options.include_camera: true` 可把动作和相机一起导出为 ZIP。支持 VMD、NPZ 和 FlowHMR 骨架的 FBX。导出沿用本地的动作结果和时间线，`output_path` 使用绝对路径。
 
 ## 视频和生成参数
 

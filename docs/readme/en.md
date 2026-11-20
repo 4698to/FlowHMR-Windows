@@ -6,16 +6,16 @@
 
 **[Download the portable Windows edition](https://github.com/xiaoerofficial021-collab/FlowHMR-Windows/releases/latest/download/FlowHMR-Windows.zip)** · [Release notes](https://github.com/xiaoerofficial021-collab/FlowHMR-Windows/releases/latest) · [FlowHMR paper](https://arxiv.org/abs/2610.03691)
 
-## What's new in v0.3.6
+## What's new in v0.3.7
 
-- **Custom retargeting and presets.** Pick bones in 3D using a floating, resizable panel. The guide continues from the body to both hands, with automatic mirroring on by default. Retargeting accounts for the target's height and limb lengths. Save character settings and reusable presets, and browse both by thumbnail.
-- **Export to the current character.** Mixamo and MetaHuman no longer ask for a template file at export. Character exports keep the saved retargeting and corrections; Mixamo can still use a generic rig. Compatible PMX rigs support IK and FK. Automatic root mapping prefers `センター` and falls back to `全ての親`. After retargeting a custom FBX, choose Current Character FBX to export its original skeleton with optional skin. Current Character FBX exports one person at a time, preserving their placement and entry time in a group scene. VRM keeps its GLB and VRMA export options.
-- **Generic VMD uses character corrections.** With a character applied, generic export keeps joint rotation and translation corrections, root adjustments, and foot IK/FK while using standard MMD bone names. Export to the current PMX for its exact proportions and sole contact.
-- **Smoother slow playback.** Choose a timeline display rate and keep it between sessions. Interpolated poses make slow playback smoother while source synchronization and export timing stay the same.
-- **AMD Radeon RX 6000 (experimental).** The Windows 11 runtime manager offers ROCm packages matched to the GPU architecture. The packages were checked; end-to-end motion capture on RX 6000 hardware is still unverified.
-- **MCP compatibility.** The 19 existing tools and background export options stay compatible. MCP can switch IK on custom FBX/VRM rigs with assigned controllers and report the active device backend. Exports that bake character corrections use the desktop app.
+- **Portable updates.** Open **Check for updates** in an existing installation to read these notes and install the update. You can also import the official portable ZIP.
+- **Source camera recovery (experimental).** Recover, preview or recalculate the original camera after generating motion. Export a matching FBX, VMD or NPZ camera. Footage with zoom or dolly motion can use a recovered camera path and focal length. GeoCalib helps estimate ground tilt.
+- **Person stitching and scene alignment (experimental).** Join the same person's clips on one timeline, or confirm several people in order and align them in one scene. Local arm transitions use pose evidence close to the cut.
+- **Torso motion optimization.** An optional extra generation pass uses FlowHMR base to re-estimate pelvis, spine, neck and head rotations. The standard motion's foot positions and orientations serve as targets. Off by default.
+- **On-demand models.** The **Models** panel lists separate downloads for SAM 2.1 (experimental person crossing), FlowHMR base and GeoCalib.
+- **Distant previews and MCP.** Reduces skin flicker on affected characters at a distance. MCP can start, query and stop camera recovery and export motion with its matching camera.
 
-[Full release notes](../release-windows.md) · [Previous release: v0.3.5](../release-windows-v0.3.5.md)
+[Full release notes](../release-windows.md) · [Previous release: v0.3.6](../release-windows-v0.3.6.md)
 
 ## System requirements and supported hardware
 

@@ -5,6 +5,7 @@ import { makePmxNativeIk } from "./pmx-native-ik.js";
 import { flattenJointCorrections, makePoseOffsets, normalizePoseOffsets, PMX_BASELINE_VERSION } from "./pose-offsets.js";
 import { assertRetargetProfile, customJointEdits, measureProportions, normalizeRetargetProfile, targetSkeleton } from "./retarget-profile.js";
 import { appError } from "./i18n.js";
+import { characterHeightScale } from "./paired-camera.js";
 
 const JOINTS = 52;
 const UP = new Vector3(0, 1, 0);
@@ -652,6 +653,7 @@ export function createPmxRetarget(mesh, rest, motion, { poseOffsets = null, inde
   // from the standing pelvis so a clip can start crouching or in midair.
   const rootAnchor = new Vector3(joints[0], sourceStandingY, joints[2]);
   const hipHeightOffset = targetHipHeight - sourceHipHeight;
+  const cameraScale = characterHeightScale(source[15], sourceSole, bindPosition[map[15]], targetSole);
   const soleGrounding = support ? soleGroundingProfile(motion, soleContacts, legs) : null;
   const controllerLeg = new Map();
   for (const control of nativeIk.moving.values()) {
@@ -1418,6 +1420,8 @@ export function createPmxRetarget(mesh, rest, motion, { poseOffsets = null, inde
   }
   const nativeControllers = controllers(nativeIk);
   return { apply, vmd, setPoseOffsets, editableCorrections, nativeIkAvailable: nativeIk.available, nativeControllers, mirrorRotation, matched: map.filter((i) => i >= 0).length,
-    sourceToTarget: Array.from(map), skippedGrants, support, rootMotionScale, proportions };
+    sourceToTarget: Array.from(map), skippedGrants, support, rootMotionScale, proportions,
+    cameraRig: cameraScale && { scale: cameraScale, pelvis: skin[map[0]],
+      sampledPelvis: (out) => edits.position(worldPosition[map[0]], offset, worldPosition[map[0]], out) } };
 }
 

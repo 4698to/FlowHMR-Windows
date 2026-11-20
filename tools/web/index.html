@@ -102,8 +102,17 @@
       <h3 class="card-title" id="personTitle" data-i18n="person.choose">选择人物</h3>
       <p class="card-help" id="personCount"></p>
       <div class="person-list" id="personList"></div>
-      <button type="button" class="btn-primary block" id="personConfirm" disabled data-i18n="person.check">请勾选人物</button>
-      <p class="error hidden" id="personError"></p>
+      <label class="track-join-option hidden" id="personJoinRow">
+        <input type="checkbox" id="personJoinTracks">
+        <span data-i18n="person.join_label">按人物接续片段（实验性）</span>
+      </label>
+      <p class="card-help hidden" id="personJoinHelp" data-i18n="person.join_help">一次勾选同一人的片段，确认后再选下一人。</p>
+      <div class="person-group-list hidden" id="personGroups"></div>
+      <div class="person-actions">
+        <button type="button" class="btn-secondary hidden" id="personGroupNext" disabled></button>
+        <button type="button" class="btn-primary" id="personConfirm" disabled data-i18n="person.check">请勾选人物</button>
+      </div>
+      <p class="error hidden" id="personError" role="alert"></p>
       <button type="button" class="btn-secondary block rerun-btn hidden" id="personReselect"
               title="重新检测并选择人物" data-i18n-title="person.reselect_hint" data-i18n="person.reselect">更换人物</button>
     </section>
@@ -164,6 +173,29 @@
         <input class="input" id="optVggt" type="number" min="1" max="120" step="1" value="10">
       </label>
       <p class="setting-help" id="cameraHint" data-i18n="camera.static_hint">仅平移、推拉或缩放通常选固定机位。镜头明显转向、俯仰或滚转时，选运动相机。</p>
+      <div class="source-camera-bar hidden" id="sourceCameraBar" role="group" aria-labelledby="sourceCameraTitle">
+        <div class="source-camera-heading">
+          <strong id="sourceCameraTitle" data-i18n="camera.workspace">相机反求（实验性）</strong>
+          <span class="source-camera-operation" id="sourceCameraOperation" role="status"></span>
+        </div>
+        <div class="source-camera-actions">
+          <button type="button" class="btn-secondary small" id="sourceCameraRetry" disabled>生成相机</button>
+          <button type="button" class="btn-secondary small" id="sourceCameraView" aria-pressed="false" disabled data-i18n="camera.preview">原片机位预览</button>
+          <button type="button" class="btn-secondary small hidden" id="sourceCameraCancel" data-i18n="camera.cancel_recompute">停止计算</button>
+          <details class="editor-menu source-camera-export" id="sourceCameraExportMenu">
+            <summary id="sourceCameraExport" aria-disabled="true" data-i18n="camera.export">导出相机</summary>
+            <div class="editor-menu-popup">
+              <p class="camera-export-label" data-i18n="camera.export_only">仅相机（与 SMPL-H 动作对齐）</p>
+              <div class="camera-export-formats" id="sourceCameraFormats">
+                <button type="button" data-camera-format="fbx">FBX</button>
+                <button type="button" data-camera-format="vmd">VMD</button>
+                <button type="button" data-camera-format="npz">NPZ</button>
+              </div>
+              <button type="button" id="sourceCameraExportPair" data-i18n="camera.export_pair">导出动作和相机…</button>
+            </div>
+          </details>
+        </div>
+      </div>
       <div class="setting-row person-setting">
         <div>
           <div class="setting-label" data-i18n="person.manual">手动选人</div>
@@ -318,13 +350,18 @@
       </div>
       <ol class="stages" id="stageList"></ol>
       <p class="job-msg" id="jobMsg"></p>
+      <p class="setting-help job-warning hidden" id="jobCameraWarning" role="status"></p>
+      <details class="setting-help hidden" id="pairedCameraDetails">
+        <summary data-i18n="camera.details">摄像机说明</summary>
+        <div id="pairedCameraReport"></div>
+      </details>
       <p class="setting-help job-warning hidden" id="jobLongMotion"></p>
       <p class="setting-help hidden" id="jobCamera"></p>
       <p class="setting-help hidden" id="jobSamBatch"></p>
       <p class="setting-help hidden" id="jobHamer"></p>
       <p class="setting-help hidden" id="jobCorrection"></p>
       <p class="error hidden" id="jobError"></p>
-      <button type="button" class="btn-primary block rerun-btn hidden" id="btnAlignScene" data-i18n="progress.align">对齐场景</button>
+      <button type="button" class="btn-primary block rerun-btn hidden" id="btnAlignScene" data-i18n="progress.align">对齐场景（实验性）</button>
       <button type="button" class="btn-secondary block rerun-btn hidden" id="btnRerun"
               title="用当前设置再生成一轮" data-i18n-title="progress.rerun_hint" data-i18n="progress.rerun">用当前设置重跑</button>
       <button type="button" class="btn-primary block rerun-btn hidden" id="btnSafeRerun"
@@ -384,6 +421,7 @@
         </a>
       </div>
     </div>
+    <div class="source-camera-warning hidden" id="sourceCameraWarning" role="status"></div>
     <div class="viewer-wrap">
       <div id="viewer" tabindex="-1"></div>
       <div class="viewport-label"><strong id="viewportName" data-i18n="view.user_perspective">用户透视</strong><span id="viewportObject" data-i18n="view.scene">场景集合</span></div>
@@ -619,9 +657,14 @@
         <option value="retarget_glb" data-i18n="retarget.glb">VRM 角色 GLB</option>
         <option value="vmd">MMD VMD</option>
         <option value="vrma">VRM Animation (.vrma)</option>
+        <option value="npz">NPZ</option>
       </select>
     </label>
     <p class="setting-help export-format-hint" id="motionExportHint"></p>
+    <div id="pairedCameraOptions">
+      <label class="fbx-export-skin"><input type="checkbox" id="includeCamera"> <span data-i18n="export.include_camera">同时导出摄像机</span></label>
+      <p class="setting-help" id="pairedCameraHint"></p>
+    </div>
     <div id="mixamoRigOptions" class="character-file hidden">
       <select class="input" id="mixamoRig" aria-label="骨架" data-i18n-label="export.fbx_rig">
         <option value="target" id="mixamoRigCharacter"></option>

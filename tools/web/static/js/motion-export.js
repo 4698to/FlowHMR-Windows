@@ -1,10 +1,16 @@
-import { $, el, personColor, show } from "./utils.js";
+import { $, downloadBlob, downloadFile, el, personColor, safeStem, show } from "./utils.js";
 import { appError, message as m, setText } from "./i18n.js";
 import * as api from "./api.js";
+import { Vector3 } from 'three';
+import { animatedCameraTransform, pelvisCameraTransform } from './paired-camera.js';
+import { scenePlacement } from './frame-sample.js';
+import { cameraAvailable, cameraStatusMessage, cameraStatusForJob } from './camera-messages.js';
+import { unzipSync, zipSync } from '../vendor/three/fbx/libs/fflate.module.js';
 
 const FORMAT_STORAGE = "flowhmr-export-format";
 const SKIN_STORAGE = "flowhmr-fbx-with-skin";
 const POSE_STORAGE = "flowhmr-fbx-first-pose";
+const CAMERA_FORMATS = ['flowhmr', 'vmd', 'npz'];
 
 export function initMotionExport(getBodyVariant, viewer) {
   const dialog = $("fbxExportDialog"), button = $("dlFbx"), menu = $("menuFbx");
@@ -14,10 +20,12 @@ export function initMotionExport(getBodyVariant, viewer) {
   const mixamoRig = $("mixamoRig"), mixamoCharacter = $("mixamoRigCharacter");
   const vmdTarget = $("vmdTarget"), characterOption = $("vmdTargetCharacter");
   const chooseCharacter = $("vmdChooseCharacter");
+  const includeCamera = $('includeCamera');
   const formats = [...format.options];
   let preferred = localStorage.getItem(FORMAT_STORAGE);
   if (preferred === "mixamo_iclone") preferred = "mixamo";
   let result = null, pending = null, entries = [], multiPeople = [], single = false;
+  let pairedExport = false;
 
   skin.checked = localStorage.getItem(SKIN_STORAGE) === "on";
   const savedPose = localStorage.getItem(POSE_STORAGE);
@@ -44,7 +52,10 @@ export function initMotionExport(getBodyVariant, viewer) {
   }
   function sync() {
     const glb = formats.find(({value})=>value==="retarget_glb");
-    glb.disabled=glb.hidden=!result || !retargeted().length;
+    glb.disabled = !result || !retargeted().length;
+    for (const option of formats) {
+      option.hidden = (pairedExport && !CAMERA_FORMATS.includes(option.value)) || (option === glb && glb.disabled);
+    }
     if (glb.disabled && format.value==="retarget_glb") format.value="flowhmr";
     const profile = format.value;
     const mixamo = profile === "mixamo", metahuman = profile === "metahuman";
@@ -61,6 +72,11 @@ export function initMotionExport(getBodyVariant, viewer) {
     setText($("fbxSkinHint"), m(useActor ? "export.fbx_target_skin" : "export.skin_hint"));
     show("vmdOptions", profile === "vmd");
     const roles = targets();
+    const cameraSupported = CAMERA_FORMATS.includes(profile);
+    show('pairedCameraOptions', cameraSupported);
+    includeCamera.disabled = !!pending || !result;
+    if (!cameraSupported) includeCamera.checked = false;
+    if (!pending) setText($('pairedCameraHint'), m(result?.cameraAvailable ? 'export.camera_ready' : 'export.camera_missing'));
     characterOption.disabled = characterOption.hidden = !roles.length;
     if (roles.length) setText(characterOption, roles.length === 1
       ? m("export.vmd_character", { name: roles[0].asset.name }) : m("export.vmd_characters"));
@@ -76,7 +92,7 @@ export function initMotionExport(getBodyVariant, viewer) {
     const busy = !!pending;
     format.disabled = peopleField.disabled = vmdTarget.disabled = chooseCharacter.disabled =
       mixamoRig.disabled = openCharacters.disabled = skin.disabled = busy;
-    confirm.disabled = !result || !profile || busy || (entries.length > 0 && !selected().length)
+    confirm.disabled = !result || !profile || busy || (pairedExport && !includeCamera.checked) || (entries.length > 0 && !selected().length)
       || ((metahuman || currentFbx) && !actor);
     setText(confirm, m(busy ? "export.preparing" : "common.export"));
   }
@@ -101,35 +117,37 @@ export function initMotionExport(getBodyVariant, viewer) {
     button.disabled = menu.disabled = !enabled;
     show(button, enabled);
   }
-  function download(href, filename = "") {
-    const link = document.createElement("a");
-    link.href = href;
-    link.download = filename;
-    link.click();
-  }
-  function downloadBlob(blob, filename) {
-    const href = URL.createObjectURL(blob);
+  function saveExport(blob, filename) {
     dialog.close("export");
-    download(href, filename);
-    setTimeout(() => URL.revokeObjectURL(href), 60_000);
+    downloadBlob(blob, filename);
   }
 
-  button.onclick = () => {
+  function open(withCamera = false) {
     if (!result || dialog.open) return;
+    if (pairedExport) includeCamera.checked = false;
+    pairedExport = withCamera;
     dialog.returnValue = "";
     showError();
     vmdTarget.value = targets().length ? "target" : "generic";
     mixamoRig.value = "target";
     // Resolve the default after preview and character restoration have run.
     const currentFbx = formats.find(({value}) => value === "retarget_fbx");
-    if ((!preferred || preferred === "retarget_glb") && !currentFbx.disabled && fbxActor("retarget_fbx")) {
+    if (withCamera) {
+      const paired = formats.filter((option) => !option.disabled && CAMERA_FORMATS.includes(option.value));
+      format.value = (paired.find((option) => option.value === preferred) ?? paired[0])?.value ?? "";
+      includeCamera.checked = true;
+    } else if ((!preferred || preferred === "retarget_glb") && !currentFbx.disabled && fbxActor("retarget_fbx")) {
       format.value = "retarget_fbx";
     } else if (preferred === "retarget_glb" && retargeted().length) format.value = preferred;
+    else if (preferred && formats.some((option) => !option.disabled && option.value === preferred)) format.value = preferred;
     sync();
     dialog.showModal();
-  };
+  }
+  button.onclick = () => open();
+  $('sourceCameraExportPair').onclick = () => open(true);
   menu.onclick = () => button.click();
   peopleField.addEventListener("change", sync);
+  includeCamera.addEventListener('change', sync);
   vmdTarget.addEventListener("change", sync);
   mixamoRig.addEventListener("change", () => { showError(); sync(); });
   openCharacters.onclick = () => {
@@ -170,9 +188,54 @@ export function initMotionExport(getBodyVariant, viewer) {
     const actor = profile === "retarget_fbx" || profile === "metahuman" || (profile === "mixamo" && mixamoRig.value !== "generic")
       ? fbxActor(profile) : null;
     if ((profile === "metahuman" || profile === "retarget_fbx") && !actor) { sync(); return; }
+    if (includeCamera.checked) {
+      const operation = pending = new AbortController();
+      showError();
+      // Preserve the user's selection while marking the operation busy.
+      sync();
+      try {
+        await api.prepareCamera(id, operation.signal, (status) => {
+          if (dialog.open) setText($('pairedCameraHint'), cameraStatusMessage(status));
+        });
+        result.cameraAvailable = true;
+        let files, transform = { scale: 1, translation: [0, 0, 0] };
+        if (targetVmd || correctedVmd) {
+          const target = await makeVmd(vmdActors, result.filename, targetVmd, operation.signal, { withCamera: true });
+          files = target.files;
+          transform = target.cameraTransform ?? transform;
+        } else {
+          const url = profile === 'npz' ? api.npzUrl(id) : profile === 'vmd' ? api.motionUrl(id, 'vmd', people)
+            : api.fbxUrl(id, skin.checked, getBodyVariant(), people, pose.value, 'flowhmr');
+          const motion = await api.getMotionDownload(url, operation.signal);
+          files = motion.type?.startsWith('application/zip')
+            ? Object.entries(unzipSync(motion.bytes)).map(([name, bytes]) => ({ name, bytes }))
+            : [{ name: `motion.${profile === 'flowhmr' ? 'fbx' : profile}`, bytes: motion.bytes }];
+        }
+        const cameraZip = new Uint8Array(await api.exportCamera(id, profile === 'flowhmr' ? 'fbx' : profile, transform, operation.signal));
+        files.push(...Object.entries(unzipSync(cameraZip)).map(([name, bytes]) => ({ name, bytes })));
+        if (pending !== operation || result?.id !== id || !dialog.open) return;
+        const stem = safeStem(result.filename);
+        const entries = Object.create(null);
+        for (const { name, bytes } of files) {
+          if (!name || /[/\\\x00-\x1f]/.test(name) || Object.hasOwn(entries, name)) throw new Error('Invalid or duplicate paired export filename');
+          entries[name] = bytes;
+        }
+        saveExport(new Blob([zipSync(entries, { level: 1 })], { type: 'application/zip' }), `${stem}_motion_camera.zip`);
+      } catch (cause) {
+        if (!operation.signal.aborted && dialog.open) showError(cause);
+      } finally {
+        if (pending === operation) { pending = null; sync(); }
+      }
+      return;
+    }
+    if (profile === 'npz') {
+      dialog.close('export');
+      downloadFile(api.npzUrl(id));
+      return;
+    }
     if (profile === "vrma" || (profile === "vmd" && !targetVmd && !correctedVmd)) {
       dialog.close("export");
-      download(api.motionUrl(id, profile, people));
+      downloadFile(api.motionUrl(id, profile, people));
       return;
     }
     if (!actor && profile !== "vmd" && profile !== "retarget_glb") {
@@ -182,7 +245,7 @@ export function initMotionExport(getBodyVariant, viewer) {
         localStorage.setItem(POSE_STORAGE, pose.value);
       }
       dialog.close("export");
-      download(api.fbxUrl(id, !advancedSkeleton && skin.checked, getBodyVariant(), people,
+      downloadFile(api.fbxUrl(id, !advancedSkeleton && skin.checked, getBodyVariant(), people,
         advancedSkeleton ? "t" : pose.value, profile));
       return;
     }
@@ -206,7 +269,7 @@ export function initMotionExport(getBodyVariant, viewer) {
         exported = await api.exportTargetFbx(id, people, profile, actor, baked, withSkin, operation.signal);
       }
       if (pending !== operation || result?.id !== id || !dialog.open) return;
-      downloadBlob(exported.blob, exported.filename);
+      saveExport(exported.blob, exported.filename);
     } catch (cause) {
       if (!operation.signal.aborted && dialog.open) {
         showError(profile === "vmd" ? m("export.pmx_vmd_failed", { detail: cause }) : cause);
@@ -221,13 +284,21 @@ export function initMotionExport(getBodyVariant, viewer) {
 
   return {
     setResult(id, job) {
-      result = { id, filename: job.filename };
-      const availableByFormat = { vmd: !!job.has_vmd, vrma: !!job.has_vrma };
+      result = { id, filename: job.filename, cameraAvailable: cameraAvailable(cameraStatusForJob(job)) };
+      includeCamera.checked = false;
+      const availableByFormat = { vmd: !!job.has_vmd, vrma: !!job.has_vrma, npz: !!job.has_vmd };
       for (const option of formats) option.disabled = !(availableByFormat[option.value] ?? job.has_fbx);
       const available = formats.filter((option) => !option.disabled && option.value!=="retarget_glb");
       format.value = (available.find((option) => option.value === preferred) ?? available[0])?.value ?? "";
       setPeople(job.scene);
       setButtons(!!available.length);
+      sync();
+    },
+    updateCameraStatus(job) {
+      if (result?.id !== job.id) return;
+      const available = cameraAvailable(cameraStatusForJob(job));
+      if (result.cameraAvailable === available) return;
+      result.cameraAvailable = available;
       sync();
     },
     clear() {
@@ -242,13 +313,14 @@ export function initMotionExport(getBodyVariant, viewer) {
   };
 }
 
-export async function makeVmd(actors, filename, target, signal) {
+export async function makeVmd(actors, filename, target, signal, { withCamera = false } = {}) {
   if (!actors.length) throw appError("export.vmd_character_unavailable");
   const [solverModule, { encodePmxVmd, packPmxVmdZip }] = await Promise.all([
     target ? import("./pmx-retarget.js") : import("./generic-vmd.js"), import("./pmx-vmd.js"),
   ]);
-  const stem = (filename || "FlowHMR").replace(/\.[^.]+$/, "").replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").slice(0, 100);
+  const stem = safeStem(filename);
   const files = [];
+  let cameraTransform = null;
   for (const actor of actors) {
     signal.throwIfAborted();
     const { asset } = actor;
@@ -258,10 +330,22 @@ export async function makeVmd(actors, filename, target, signal) {
     try {
       solver = target ? solverModule.createPmxRetarget(clone, asset.rest, motion, { poseOffsets: actor.poseOffsets })
         : solverModule.genericVmdRig(motion, actor.poseOffsets);
+      const rig = solver.cameraRig;
+      const sceneTrack = actor.sceneTrack ?? { yaw: actor.yaw, offset: actor.offset };
+      const placement = frame => scenePlacement(sceneTrack, actor.start + frame);
+      let onSample;
+      if (withCamera && !files.length && rig) {
+        const samples = [], pelvis = new Vector3();
+        cameraTransform = animatedCameraTransform(rig.scale, actor.cameraStart, samples);
+        onSample = (frame) => {
+          rig.sampledPelvis(pelvis);
+          samples.push(pelvisCameraTransform(rig.scale, motion, frame, pelvis.toArray(), placement(frame)).translation);
+        };
+      }
       const bytes = await encodePmxVmd({
         solver, rest: target ? asset.rest : solver.rest, modelName: target ? asset.name : "FlowHMR",
         frameCount: motion.frames, fps: actor.fps, startFrame: actor.start, sceneEndFrame: actor.sceneEnd,
-        placement: { yaw: actor.yaw, offset: actor.offset }, signal,
+        placement, visibleRanges:sceneTrack.visible_ranges, signal, onSample,
       });
       const tag = actor.person == null ? "" : `_person${actor.person}`;
       files.push({ name: `${stem}${tag}_${target ? "pmx" : "vmd"}.vmd`, bytes });
@@ -270,7 +354,7 @@ export async function makeVmd(actors, filename, target, signal) {
       else solver?.dispose();
     }
   }
-  return files.length === 1
+  return { files, cameraTransform, ...(files.length === 1
     ? { blob: new Blob([files[0].bytes], { type: "application/octet-stream" }), filename: files[0].name }
-    : { blob: packPmxVmdZip(files), filename: `${stem}${target ? "_pmx" : ""}_vmd.zip` };
+    : { blob: packPmxVmdZip(files), filename: `${stem}${target ? "_pmx" : ""}_vmd.zip` }) };
 }

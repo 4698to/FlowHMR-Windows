@@ -119,10 +119,11 @@ body { height: 100dvh; }
   min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; padding: 3px;
 }
 #personCard.attention .person { flex: none; padding-block: 4px; }
+#personCard.attention .person-slot > .person { flex: 1; width: 0; }
 #personCard.attention .person-thumb { width: 32px; height: 42px; }
 #personCard.attention .person-name, #personCard.attention .person-tag { white-space: nowrap; }
 #personCard.attention .person-tag { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-#personCard.attention #personConfirm { padding: 4px 6px; font-size: 12px; }
+#personCard.attention .person-actions button { padding: 4px 6px; font-size: 12px; }
 @container source-editor (max-height: 380px) {
   #personCard.attention #personCount { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 }
@@ -138,7 +139,7 @@ body { height: 100dvh; }
   #personCard.attention .person-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #personCard.attention :is(.person-dot, .person-tag) { display: none; }
   #personCard.attention .person-check { width: 16px; height: 16px; right: 5px; }
-  #personCard.attention #personConfirm { padding-inline: 3px; font-size: 11px; }
+  #personCard.attention .person-actions button { padding-inline: 3px; font-size: 11px; }
 }
 #previewIssue { margin: 7px 0 0; }
 .dropzone { padding: 22px 10px; border-width: 1px; }
@@ -708,4 +709,29 @@ body { height: 100dvh; }
   .timeline-rate, .workspace-status span:last-child { display: none; }
   .timeline-head { grid-template-columns: auto 1fr; }
   .timeline-head .controls { justify-content: center; }
+}
+.source-camera-heading, .source-camera-actions {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 5px;
+}
+.source-camera-bar {
+  display: grid; gap: 5px; margin: 6px 0; padding-block: 6px;
+  border-block: 1px solid var(--line); font-size: 12px;
+}
+.source-camera-actions .small, .source-camera-export summary { padding: 4px 8px; white-space: nowrap; }
+.source-camera-actions button[aria-pressed="true"] { border-color: var(--active); color: var(--text); }
+.source-camera-export summary { width: fit-content; border: 1px solid var(--line); }
+.source-camera-export summary[aria-disabled="true"] { opacity: .48; cursor: default; background: transparent; }
+.source-camera-export[open] { flex: 1 1 100%; min-width: 0; }
+.source-camera-export .editor-menu-popup {
+  position: static; width: auto; min-width: 0; margin-top: 4px; box-shadow: none;
+}
+.camera-export-label { margin: 4px 8px 2px; color: var(--muted); overflow-wrap: anywhere; }
+.camera-export-formats { display: flex; margin: 3px 0; }
+.camera-export-formats button { justify-content: center; }
+.source-camera-operation { flex: 1 1 95px; min-width: 0; color: var(--muted); overflow-wrap: anywhere; }
+.source-camera-warning {
+  flex: 0 0 auto; min-width: 0;
+  padding: 8px 12px; border-bottom: 1px solid #b98a3c;
+  background: #302617ed; color: #ffe0a0; font-size: 12px; line-height: 1.5;
+  overflow-wrap: anywhere;
 }

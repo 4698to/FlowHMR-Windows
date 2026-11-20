@@ -1,10 +1,12 @@
 import { Matrix4, Quaternion, Vector3 } from "three";
 import { createFbxCharacterRetarget } from "./fbx-character-retarget.js";
 import { appError } from "./i18n.js";
+import { scenePlacement } from "./frame-sample.js";
 
 // Use the preview's solver, then express its poses in the original FBX
 // hierarchy. The FBX writer can keep the original bind pose, names and axes.
-export async function bakeTargetFbx({asset, libraryId, motion, poseOffsets, offset, yaw}, signal, profile = asset.profile) {
+export async function bakeTargetFbx({asset, libraryId, motion, poseOffsets, offset, yaw,
+  sceneTrack = { offset, yaw }, sourceStart = 0}, signal, profile = asset.profile) {
   const root = asset.clone();
   try {
     const rig = createFbxCharacterRetarget(root, asset, motion, {poseOffsets, libraryId});
@@ -60,12 +62,14 @@ export async function bakeTargetFbx({asset, libraryId, motion, poseOffsets, offs
     // horizontal root motion. Respect an explicitly assigned root.
     const horizontalRoot = profile === "metahuman" && !(manual?.root >= 0) &&
       /(?:^|[:|])root$/i.test(body.userData.originalName ?? body.name);
-    const placement = new Matrix4().makeRotationY(yaw).setPosition(new Vector3().fromArray(offset));
+    const placement = new Matrix4(), sceneOffset = new Vector3();
     const position = new Vector3(), rotation = new Quaternion(), scale = new Vector3();
     const inv = new Matrix4(), matrix = new Matrix4(), world = new Matrix4();
     const adjusted = new Matrix4(), reconstructed = new Matrix4();
     let nextYield = performance.now() + 25;
     for (let frame = 0; frame < motion.frames; frame++) {
+      const basis = scenePlacement(sceneTrack, sourceStart + frame);
+      placement.makeRotationY(basis.yaw).setPosition(sceneOffset.fromArray(basis.offset));
       if (!rig.apply(frame)) throw appError("retarget.export_failed");
       root.updateMatrixWorld(true);
       if (horizontalRoot) {

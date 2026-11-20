@@ -3,9 +3,13 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { $, show, personColor } from "./utils.js";
-import { appError, message as m, setAttr, setText, t } from "./i18n.js";
+import { appError, localize, message as m, setAttr, setText, t } from "./i18n.js";
 import * as api from "./api.js";
 import { initPreviewCharacter } from "./preview-character.js";
+import { applySourceCamera, sourceViewport, pelvisCameraTransform, animatedCameraTransform } from './paired-camera.js';
+import { sampleFrame, sameFrameSegment, scenePlacement, sceneActorVisible } from './frame-sample.js';
+import { cameraQualityMessage } from './camera-messages.js';
+import { bindSourceCamera } from './source-camera-controls.js';
 
 const BODY_STORAGE = "flowhmr-body-variant";
 const MOUSE_MODE_STORAGE = "flowhmr-mouse-mode";
@@ -58,7 +62,8 @@ export function initViewer(preview) {
   const { video, clock } = preview;
   const container = $("viewer");
   const scrub = $("scrub");
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  // Distant shots still need to distinguish closely spaced hair and clothing.
+  const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.shadowMap.enabled = true;
@@ -83,6 +88,10 @@ export function initViewer(preview) {
 
   const perspective = new THREE.PerspectiveCamera(40, 1, 0.05, 200);
   const orthographic = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.05, 200);
+  const recoveredCamera = new THREE.PerspectiveCamera();
+  let sourceView = false, cameraData = null, orbitCamera = perspective, sourceFrameValid = false;
+  let cameraNeedsSourceBody = false;
+  const sourceBodyPreview = () => sourceView && cameraNeedsSourceBody;
   const defaultTarget = new THREE.Vector3(0, 0.9, 0);
   const frontOffset = new THREE.Vector3(0, -0.43, 4.8);
   const frontDirection = frontOffset.clone().normalize();
@@ -103,6 +112,7 @@ export function initViewer(preview) {
   const zoom = { target: camera.position.distanceTo(controls.target) };
   renderer.domElement.addEventListener("wheel", (e) => {
     e.preventDefault();
+    if (sourceView) return;
     const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? container.clientHeight : 1;
     const px = Math.max(-120, Math.min(120, e.deltaY * unit));  // cap per event (~1 notch)
     zoom.target = THREE.MathUtils.clamp(zoom.target * Math.pow(1.0015, px),
@@ -145,7 +155,7 @@ export function initViewer(preview) {
   scene.add(sun, sun.target);
 
   function syncCharacterLighting() {
-    const custom = !!character.active;
+    const custom = !!character.active && !sourceBodyPreview();
     ambient.intensity = custom ? .62 : 1.4;
     sun.intensity = custom ? 1.42 : 1.9;
     fill.intensity = custom ? .28 : .55;
@@ -199,15 +209,21 @@ export function initViewer(preview) {
     prevRoot: new THREE.Vector3(),
   };
   const character = initPreviewCharacter(() => actors, (editedActor) => {
-    if (editedActor) {
+    const previewChanged = updateSourceAvailability();
+    if (editedActor && !previewChanged) {
       // While adjusting retarget offsets only the draft rig needs a redraw.
       drawActorFrame(editedActor, state.visualFrame);
+      updateSourceCamera();
       renderer.shadowMap.needsUpdate = true;
       invalidate();
       return;
     }
     syncSkeletonDisplay();
     if (state.meta && state.visualFrame >= 0) updateFrameRoot(state.visualFrame);
+    if (sourceView) {
+      showSourceQuality();
+      updateSourceCamera();
+    }
     labelBody();
   }, (error) => setText($("viewportObject"), error));
   $("retargetDialog").addEventListener("close",syncSkeletonDisplay);
@@ -267,6 +283,21 @@ export function initViewer(preview) {
   updateGizmo();
 
   function setProjection(next) {
+    if (sourceView) {
+      const usedSourceBody = sourceBodyPreview();
+      sourceView = false;
+      show('sourceCameraWarning', false);
+      camera = orbitCamera;
+      controls.object = camera;
+      controls.enabled = true;
+      $('sourceCameraView').setAttribute('aria-pressed', 'false');
+      if (usedSourceBody) {
+        syncSkeletonDisplay();
+        state.prevRoot.copy(frameRoot(state.visualFrame));
+        labelBody();
+      }
+      actors.forEach((actor) => drawActorFrame(actor,state.visualFrame));
+    }
     if (next !== camera) {
       next.position.copy(camera.position);
       next.quaternion.copy(camera.quaternion);
@@ -300,6 +331,107 @@ export function initViewer(preview) {
     setProjection(camera === perspective ? orthographic : perspective);
   }
   $("toggleProjection").onclick = toggleProjection;
+  const cameraSubject = () => actors[0];
+  const identityCamera = { scale: 1, translation: [0, 0, 0] };
+  const cameraPelvis = new THREE.Vector3();
+
+  function updateSourceAvailability() {
+    const previous = cameraNeedsSourceBody;
+    const entry = cameraSubject()?.character;
+    cameraNeedsSourceBody = !!entry && !entry.rig.cameraRig;
+    sourceCamera.setPreviewHint(cameraNeedsSourceBody ? m('camera.preview_source_body') : '');
+    return sourceView && cameraNeedsSourceBody !== previous;
+  }
+  function cameraTransform(frame) {
+    const actor = cameraSubject(), entry = actor?.character, rig = entry?.rig.cameraRig;
+    if (!rig) return identityCamera;
+    rig.pelvis.getWorldPosition(cameraPelvis);
+    actor.group.worldToLocal(cameraPelvis);
+    return pelvisCameraTransform(rig.scale, entry.motion, actorFrame(actor, frame),
+      cameraPelvis.toArray(), scenePlacement(actor.sceneTrack, sourceStart(state.meta) + frame));
+  }
+  async function exportCameraTransform(signal) {
+    const actor = cameraSubject(), entry = actor?.character;
+    if (!entry?.rig.cameraRig) return identityCamera;
+    const { asset, libraryId, motion, poseOffsets } = entry;
+    const pmx = asset.kind === 'pmx';
+    const solver = await (pmx ? import('./pmx-retarget.js') : import('./fbx-character-retarget.js'));
+    signal.throwIfAborted();
+    const mesh = asset.clone();
+    try {
+      const rig = pmx ? solver.createPmxRetarget(mesh, asset.rest, motion, { poseOffsets })
+        : solver.createFbxCharacterRetarget(mesh, asset, motion, { poseOffsets, libraryId });
+      const { scale, pelvis } = rig.cameraRig;
+      const target = new THREE.Vector3(), offsets = [];
+      let nextYield = performance.now() + 20;
+      for (let f = 0; f < motion.frames; f++) {
+        signal.throwIfAborted();
+        if (!rig.apply(f)) throw appError('retarget.export_failed');
+        pelvis.getWorldPosition(target);
+        const actorPlacement = scenePlacement(actor.sceneTrack, sourceStart(actor.meta) + f);
+        offsets.push(pelvisCameraTransform(scale, motion, f, target.toArray(), actorPlacement).translation);
+        if (performance.now() >= nextYield) {
+          await new Promise(resolve => setTimeout(resolve, 0));
+          nextYield = performance.now() + 20;
+        }
+      }
+      return animatedCameraTransform(scale, sourceStart(actor.meta), offsets);
+    } finally {
+      asset.releaseClone(mesh);
+    }
+  }
+  function sourceActorVisible(frame) {
+    if (!sourceView || !state.meta || !cameraData?.source_body_visible) return true;
+    const index = Math.floor(sourceStart(state.meta)+frame-cameraData.track_start);
+    return cameraData.source_body_visible[index] !== false;
+  }
+  function updateSourceCamera() {
+    if (!sourceView || !cameraData || !state.meta) return;
+    const frame = presentationFrame(state.visualFrame);
+    sourceFrameValid = applySourceCamera(recoveredCamera, cameraData,
+      sourceStart(state.meta) + frame - cameraData.track_start, cameraTransform(frame));
+    const label = sourceFrameValid
+      ? (sourceActorVisible(state.visualFrame) ? 'view.source_camera' : 'view.source_camera_cutaway')
+      : 'view.source_camera_gap';
+    setText($('viewportName'), m(label));
+    invalidate();
+  }
+  function showSourceQuality() {
+    const quality = cameraQualityMessage(cameraData?.quality, cameraData?.coverage);
+    const message = sourceBodyPreview() ? m('camera.preview_source_body') : quality;
+    if (sourceBodyPreview() && quality) {
+      setText($('sourceCameraWarning'), () => `${t('camera.preview_source_body')} ${localize(quality)}`);
+    } else setText($('sourceCameraWarning'), message);
+    show('sourceCameraWarning', sourceView && !!message);
+  }
+  const sourceCamera = bindSourceCamera({
+    exportTransform: exportCameraTransform,
+    showing: () => sourceView,
+    exit: () => setProjection(orbitCamera),
+    enter: () => {
+      clearOrbitInertia();
+      orbitCamera = camera;
+      sourceView = true;
+      controls.enabled = false;
+      camera = recoveredCamera;
+      $('sourceCameraView').setAttribute('aria-pressed', 'true');
+      if (sourceBodyPreview()) {
+        syncSkeletonDisplay();
+        updateFrameRoot(state.visualFrame);
+        labelBody();
+      }
+      actors.forEach((actor) => drawActorFrame(actor,state.visualFrame));
+      showSourceQuality();
+      updateSourceCamera();
+    },
+    replaceCamera: (data) => {
+      cameraData = data;
+      if (sourceView) actors.forEach((actor) => drawActorFrame(actor,state.visualFrame));
+      syncGround();
+      showSourceQuality();
+      updateSourceCamera();
+    },
+  });
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.onclick = () => setView(button.dataset.view);
   });
@@ -322,7 +454,7 @@ export function initViewer(preview) {
   setMouseMode(localStorage.getItem(MOUSE_MODE_STORAGE) === "rotate" ? "rotate" : "pan");
   $("toggleGrid").onclick = (event) => {
     floor.visible = axisLines.visible = !floor.visible;
-    shadowPlane.visible = floor.visible && (!actors.length || actors.some(({ body, character }) => (character?.mesh ?? body).visible));
+    shadowPlane.visible = floor.visible && (!actors.length || actors.some(({ body, character }) => body.visible || character?.mesh.visible));
     event.currentTarget.setAttribute("aria-pressed", String(floor.visible));
     invalidate();
   };
@@ -443,7 +575,7 @@ export function initViewer(preview) {
     const { skeleton } = actor;
     if (!skeleton?.group.visible) return;
     const { points, lines, cones, stride, joints, edges, parents } = skeleton;
-    if ($("retargetDialog").open && actor.character) {
+    if ($("retargetDialog").open && actor.character && !sourceBodyPreview()) {
       const { mesh, rig } = actor.character;
       const bones = characterBones(actor.character);
       actor.group.updateWorldMatrix(true, false);
@@ -502,9 +634,11 @@ export function initViewer(preview) {
       ? $("retargetDialog").open ? "pose.target_overlay" : "character.skeleton" : "view.skeleton_hint"));
     for (const actor of actors) {
       const mesh = actor.character?.mesh;
-      actor.body.visible = !mesh && (!only || !actor.skeleton);
+      const skinVisible = !only || !actor.skeleton;
+      const source = sourceBodyPreview();
+      actor.body.visible = (!mesh || source) && skinVisible;
       if (mesh) {
-        mesh.visible = !only || !actor.skeleton;
+        mesh.visible = !source && skinVisible;
         syncCharacterWire(mesh);
       }
       if (actor.skeleton) {
@@ -568,6 +702,21 @@ export function initViewer(preview) {
   const sourceStart = (meta) => meta.track_start ?? 0;
   const actorFrame = (actor, frame) => sourceStart(state.meta) + frame - sourceStart(actor.meta);
 
+  function presentationFrame(frame, sourceFrame = Math.floor(frame)) {
+    if (state.meta.visible_ranges && sceneActorVisible(state.meta, sourceStart(state.meta) + frame)
+        !== sceneActorVisible(state.meta, sourceStart(state.meta) + sourceFrame)) return sourceFrame;
+    if (!sourceView || !cameraData) {
+      const { num_frames: count, shot_ids: shots } = state.meta;
+      if (!shots) return frame;
+      return sameFrameSegment(frame, sourceFrame, count, null, shots) ? sampleFrame(frame, count, null, shots).frame : sourceFrame;
+    }
+    const offset = sourceStart(state.meta) - cameraData.track_start;
+    const local = frame + offset;
+    const { RT, camera_valid: valid, shot_ids: shots } = cameraData;
+    if (!sameFrameSegment(local, sourceFrame + offset, RT.length, valid, shots)) return sourceFrame;
+    return sampleFrame(local, RT.length, valid, shots).frame - offset;
+  }
+
   function frameRoot(f) {
     const root = new THREE.Vector3();
     for (const actor of actors) {
@@ -576,7 +725,7 @@ export function initViewer(preview) {
       const [a, b] = actor.meta.root_trajectory[lo], [c, d] = actor.meta.root_trajectory[hi];
       const blend = p - lo;
       let x = a + blend * (c - a), z = b + blend * (d - b);
-      const scale = actor.character?.rig.rootMotionScale ?? 1;
+      const scale = sourceBodyPreview() ? 1 : actor.character?.rig.rootMotionScale ?? 1;
       if (scale !== 1) {
         const [startX, startZ] = actor.meta.root_trajectory[0];
         x = startX + (x - startX) * scale;
@@ -590,11 +739,23 @@ export function initViewer(preview) {
 
   function drawActorFrame(actor, globalFrame) {
     const { body, group, meta, verts } = actor;
-    const f = actorFrame(actor, globalFrame);
-    group.visible = globalFrame >= 0 && f >= 0 && f < meta.num_frames;
+    const source = sourceStart(state.meta) + globalFrame;
+    const { yaw, offset } = scenePlacement(actor.sceneTrack, source);
+    if (group.rotation.y !== yaw) {
+      group.rotation.y = yaw;
+      actor.cos = Math.cos(yaw);
+      actor.sin = Math.sin(yaw);
+    }
+    group.position.fromArray(offset);
+    let f = actorFrame(actor, globalFrame);
+    if (!sceneActorVisible(actor.sceneTrack, Math.floor(source) + 1)) f = Math.floor(f);
+    group.visible = globalFrame >= 0 && f >= 0 && f < meta.num_frames && sourceActorVisible(globalFrame)
+      && sceneActorVisible(actor.sceneTrack, source);
+    const anchor = sourceView && !sourceBodyPreview() && actor === cameraSubject() && actor.character?.rig.cameraRig;
+    if (anchor) actor.character.rig.apply(Math.max(0, Math.min(f, meta.num_frames - 1)));
     if (!group.visible) return;
-    if (actor.character) {
-      if (actor.character.mesh.visible || ($("retargetDialog").open && actor.skeleton?.group.visible)) actor.character.rig.apply(f);
+    if (actor.character && !sourceBodyPreview()) {
+      if (!anchor && (actor.character.mesh.visible || ($("retargetDialog").open && actor.skeleton?.group.visible))) actor.character.rig.apply(f);
       drawSkeletonFrame(actor, f);
       return;
     }
@@ -616,7 +777,7 @@ export function initViewer(preview) {
     const root = frameRoot(f);
     sun.position.copy(root).add(SUN_OFFSET);
     sun.target.position.copy(root);
-    if ($("optFollow").checked) {
+    if (!sourceView && $("optFollow").checked) {
       const delta = root.clone().sub(state.prevRoot);
       camera.position.add(delta);
       controls.target.add(delta);
@@ -632,7 +793,7 @@ export function initViewer(preview) {
     // Keep normal-speed renders on source frames. At slow speeds or higher
     // display rates, draw in-between poses without changing the source clock.
     const fractional = state.playing && (state.speed < 1 || displayRate() > m.fps);
-    const pose = fractional ? Math.min(m.num_frames - 1, state.playbackPosition) : integer;
+    const pose = presentationFrame(fractional ? Math.min(m.num_frames - 1, state.playbackPosition) : integer, integer);
     if (pose === state.visualFrame && integer === state.frame) {
       if (fractional) renderFrameCounter();
       return;
@@ -648,6 +809,7 @@ export function initViewer(preview) {
     state.visualFrame = pose;
     for (const actor of actors) drawActorFrame(actor, pose);
     updateFrameRoot(pose);
+    updateSourceCamera();
     renderFrameCounter();
     const position = pose / Math.max(1, m.num_frames - 1);
     $("timelineTrack").style.setProperty("--playhead", `calc(${position * 100}% + ${12 - 24 * position}px)`);
@@ -927,14 +1089,26 @@ export function initViewer(preview) {
         setFrame(next);
       }
     }
-    const zooming = applyZoom();
-    const orbiting = controls.update();
+    const zooming = !sourceView && applyZoom();
+    const orbiting = !sourceView && controls.update();
     if (dirty) {
       dirty = false;
       const d = camera.position.distanceTo(controls.target);
-      scene.fog.near = d + 6;
-      scene.fog.far = d + 30;
-      renderer.render(scene, camera);
+      scene.fog.near = sourceView ? 100000 : d + 6;
+      scene.fog.far = sourceView ? 100001 : d + 30;
+      renderer.setScissorTest(false);
+      renderer.setViewport(0, 0, container.clientWidth, container.clientHeight);
+      if (sourceView) {
+        renderer.clear();
+        if (sourceFrameValid) {
+          const rect = sourceViewport(container.clientWidth, container.clientHeight, cameraData.image_size_hw);
+          renderer.setViewport(...rect);
+          renderer.setScissor(...rect);
+          renderer.setScissorTest(true);
+          renderer.render(scene, camera);
+          renderer.setScissorTest(false);
+        }
+      } else renderer.render(scene, camera);
     }
     if (state.playing || zooming || orbiting) {
       if (!renderRequest) renderRequest = requestAnimationFrame(tick);
@@ -948,8 +1122,8 @@ export function initViewer(preview) {
     return poseOffsets?.retarget ? target.manualBones??target.bones : target.bones;
   }
   function labelBody() {
-    const custom = actors.filter((actor) => actor.character).length;
-    const asset = character.active;
+    const custom = sourceBodyPreview() ? 0 : actors.filter((actor) => actor.character).length;
+    const asset = sourceBodyPreview() ? null : character.active;
     setText($("viewportObject"), () => [
       t("view.scene"),
       [state.scene ? t("person.count", { count: actors.length }) : "",
@@ -991,16 +1165,21 @@ export function initViewer(preview) {
     group.add(body);
     scene.add(group);
     return { id: person.id, number: person.person, meta, verts: new Uint16Array(vertices), body, group, skeleton: null, character: null,
+      sceneTrack: { ...person, visible_ranges: person.visible_ranges ?? meta.visible_ranges,
+        yaw, offset: person.offset ?? [0, 0, 0] },
       cos: Math.cos(yaw), sin: Math.sin(yaw) };
   }
 
   function groupBounds() {
     const bounds = new THREE.Box3();
-    for (const { meta, group } of actors) {
-      group.updateMatrix();
+    const matrix = new THREE.Matrix4(), position = new THREE.Vector3();
+    for (const { meta, sceneTrack } of actors) {
       const { bbox_min: a, bbox_max: b } = meta;
-      for (const x of [a[0], b[0]]) for (const y of [a[1], b[1]]) for (const z of [a[2], b[2]]) {
-        bounds.expandByPoint(new THREE.Vector3(x, y, z).applyMatrix4(group.matrix));
+      for (const { yaw, offset } of sceneTrack.placements ?? [sceneTrack]) {
+        matrix.makeRotationY(yaw).setPosition(position.fromArray(offset));
+        for (const x of [a[0], b[0]]) for (const y of [a[1], b[1]]) for (const z of [a[2], b[2]]) {
+          bounds.expandByPoint(new THREE.Vector3(x, y, z).applyMatrix4(matrix));
+        }
       }
     }
     return { bbox_min: bounds.min.toArray(), bbox_max: bounds.max.toArray() };
@@ -1068,7 +1247,8 @@ export function initViewer(preview) {
         fps: state.meta.fps, playing: state.playing, frame_count: state.meta.num_frames,
         actors: actors.map((actor) => {
           const frame = actorFrame(actor, state.frame);
-          const active = frame >= 0 && frame < actor.meta.num_frames;
+          const active = frame >= 0 && frame < actor.meta.num_frames
+            && sceneActorVisible(actor.sceneTrack, sourceStart(state.meta) + state.frame);
           const source = actor.skeleton && active ? {
             index_space: 'SMPL-H source joint order',
             joints: actor.skeleton.parents.map((parent, index) => ({ index, parent,
@@ -1119,7 +1299,7 @@ export function initViewer(preview) {
         ? entry.asset.profile === "custom" && !entry.poseOffsets?.retarget
         : entry.asset.profile !== profile)) return null;
       return { asset:entry.asset, libraryId:entry.libraryId, motion:entry.motion, poseOffsets:entry.poseOffsets,
-        offset:actor.group.position.toArray(), yaw:actor.group.rotation.y };
+        sceneTrack:actor.sceneTrack, sourceStart:sourceStart(actor.meta) };
     },
     getRetargetActors(people) {
       const selected = new Set(people.map(String));
@@ -1130,7 +1310,7 @@ export function initViewer(preview) {
         ...a.character, person:a.number, fps:a.meta.fps,
         start:state.scene ? sourceStart(a.meta)-sourceStart(state.meta) : 0,
         frames:state.meta.num_frames,
-        offset:a.group.position.toArray(), yaw:a.group.rotation.y,
+        sceneTrack:a.sceneTrack, sourceStart:sourceStart(state.meta),
       }));
     },
     getPmxActors(people) {
@@ -1147,10 +1327,10 @@ export function initViewer(preview) {
         start: state.scene ? sourceStart(actor.meta) : 0,
         sceneEnd: state.scene ? sourceStart(state.meta) + state.meta.num_frames - 1 : null,
         fps: actor.meta.fps,
-        yaw: actor.group.rotation.y,
-        offset: actor.group.position.toArray(),
+        sceneTrack: actor.sceneTrack,
         asset: actor.character?.asset,
         motion: actor.character?.motion,
+        cameraStart: sourceStart(actor.meta),
         poseOffsets: actor.character?.poseOffsets,
       }));
     },
@@ -1174,7 +1354,10 @@ export function initViewer(preview) {
         video.currentTime = Math.min(video.duration, clock.timeOf(frame + 0.5));
       }
     },
-    async load(jobId, groupScene = null) {
+    async load(jobId, groupScene = null, job = {}) {
+      if (sourceView) setProjection(orbitCamera);
+      cameraData = null;
+      sourceCamera.select(jobId, job, false);
       loadController?.abort();
       bodyController?.abort();
       bodyController = null;
@@ -1201,6 +1384,12 @@ export function initViewer(preview) {
       removeActors();
       actors = data.map((entry) => addActor(entry, !!groupScene));
       const meta = groupScene ? { ...groupScene, ...groupBounds() } : actors[0].meta;
+      if (groupScene?.shot_ranges) {
+        meta.shot_ids = new Int32Array(meta.num_frames);
+        for (const [id, [start, end]] of groupScene.shot_ranges.entries()) {
+          meta.shot_ids.fill(id, start - meta.track_start, end - meta.track_start);
+        }
+      }
       state.jobId = jobId;
       state.meta = meta;
       state.scene = groupScene;
@@ -1233,6 +1422,8 @@ export function initViewer(preview) {
       setFrame(0);
       frameDefaultView();
       setPlaying(false);
+      updateSourceAvailability();
+      sourceCamera.preparePreview();
       void character.showForJob();
       void Promise.all(inspections).then((results) => {
         if (!load.signal.aborted && state.jobId === jobId) results.forEach((info, i) => setInspection(actors[i], info));
@@ -1240,7 +1431,11 @@ export function initViewer(preview) {
       });
       return meta;
     },
+    updateCameraStatus(job) { sourceCamera.update(job); },
     clear() {
+      if (sourceView) setProjection(orbitCamera);
+      cameraData = null;
+      sourceCamera.select(null);
       loadController?.abort();
       loadController = null;
       bodyController?.abort();

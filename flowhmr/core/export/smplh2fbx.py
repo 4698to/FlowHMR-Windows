@@ -232,12 +232,13 @@ class SMPLH2FBX:
             motions = []
             for person in people:
                 number, first, last = person["person"], person["start"], person["end"]
-                motion = {key: data[f"{key}_{number}"] for key in ("poses", "trans", "betas")}
+                motion = {key: data[f"{key}_{number}"] for key in ("poses", "trans", "betas", "valid_frames")
+                          if f"{key}_{number}" in data}
                 if motion["trans"].shape != (last - first + 1, 3):
                     raise ValueError("FBX source range does not match the scene motion")
                 motions.append((number, first, motion))
             return self._write_motions(motions, outname, int(data["mocap_framerate"]),
-                                       max(p["end"] for p in people), export_mesh, variant_path, first_pose,
+                                       max(person["end"] for person in people), export_mesh, variant_path, first_pose,
                                        profile, template_path)
 
     def _motion_geometry(self, npz_data):
@@ -315,18 +316,14 @@ class SMPLH2FBX:
         for i, node in enumerate(skel_nodes):
             animate_rotation_from_rotmats(layer, node, rotations[:, i], frame_dur, start_frame=start,
                                           preroll=reference_rotations[i] if reference else None)
-        stop = start + len(poses) - 1
-        delayed = start > 0
-        if parent_node is not None and (delayed or stop < end):
-            # A visibility curve preserves the track interval in FBX-capable scene viewers.
+        from flowhmr.multishot.timeline import display_keys, validity
+        visible = validity(npz_data.get("valid_frames"), len(poses))
+        if parent_node is not None and (start > 0 or start + len(poses) - 1 < end or not visible.all()):
+            # Preserve scene entry, exit and any complete offscreen intervals.
             curve = parent_node.Visibility.GetCurve(layer, True)
-            keys = {0: 1., start: 1.}
-            if delayed:
-                keys[0] = 0.
+            keys = display_keys(visible, start, end)
             if reference:
-                keys[-1] = 1.
-            if stop < end:
-                keys[stop + 1] = 0.
+                keys[-1] = True
 
             def step_keys(channel, values):
                 channel.KeyModifyBegin()
@@ -342,17 +339,9 @@ class SMPLH2FBX:
             step_keys(curve, sorted(keys.items()))
             # Blender imports transforms but ignores animated FBX visibility. Scale only
             # the enclosing empty outside the track; keep every active frame at unit scale.
-            hidden = 1e-5
-            scale = {0: 1., start: 1., stop: 1.}
-            if delayed:
-                scale[0] = hidden
-                scale[start - 1] = hidden
-            if reference:
-                scale[-1] = 1.
-            if stop < end:
-                scale[stop + 1] = hidden
             for axis in "XYZ":
-                step_keys(parent_node.LclScaling.GetCurve(layer, axis, True), sorted(scale.items()))
+                step_keys(parent_node.LclScaling.GetCurve(layer, axis, True),
+                          [(frame, 1. if shown else 1e-5) for frame, shown in sorted(keys.items())])
 
     def _write_motions(self, motions, outname, fps, end, export_mesh, variant_path, first_pose, profile, template_path):
         if not motions or fps <= 0 or end < 0:

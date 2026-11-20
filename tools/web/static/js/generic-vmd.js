@@ -143,6 +143,7 @@ export function genericVmdRig(motion, offsets) {
     const qs = new Float32Array(sourceTracks.length * 4), ts = new Float32Array(sourceTracks.length * 3);
     return {
       rest:{ ...rest, bones:outputBones },
+      cameraRig:rig.cameraRig,
       dispose() { geometry.dispose(); },
       vmd:{
         tracks:[...sourceTracks,...extraTracks.map(({name}) => ({name,index:byName.get(name)}))],

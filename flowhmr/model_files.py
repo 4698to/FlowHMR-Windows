@@ -23,6 +23,7 @@ SAM3D_FILES = (
     "sam-3d-body-dinov3/assets/mhr_model.pt",
 )
 VGGT = "vggt-omega/vggt_omega_1b_512.pt"
+GEOCALIB = "geocalib/pinhole.tar"
 SMPLH_FOLDER = "body_models/smplh"
 MANO_BUNDLE = "mano_v1_2"
 MANO_FILES = tuple(f"{MANO_BUNDLE}/models/MANO_{side}.pkl" for side in ("LEFT", "RIGHT"))
@@ -37,7 +38,7 @@ HAMER_FILES = ("hamer/hamer.ckpt", "hamer/model_config.yaml", "hamer/mano_mean_p
 # Optional SAM 2.1 checkpoint used by the experimental crossing optimisation.
 SAM2_CROSSING = "sam2/sam2.1_hiera_small.pt"
 SAM2_CROSSING_FILES = (SAM2_CROSSING,)
-MODEL_DESTINATIONS = (FLOWHMR_CKPT, FLOWHMR_CONFIG, *FLOWHMR_BASE_FILES, YOLOX, *SAM3D_FILES, VGGT,
+MODEL_DESTINATIONS = (FLOWHMR_CKPT, FLOWHMR_CONFIG, *FLOWHMR_BASE_FILES, YOLOX, *SAM3D_FILES, VGGT, GEOCALIB,
                       *SMPLH_FILES.values(), JOINT_REGRESSOR, *MANO_FILES, *HAMER_FILES,
                       *SAM2_CROSSING_FILES)
 

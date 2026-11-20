@@ -3,6 +3,7 @@ import { flattenJointCorrections, makePoseOffsets, normalizePoseOffsets, normali
 import { assertRetargetProfile, CHAINS, customJointEdits, measureProportions, normalizeRetargetProfile, targetSkeleton } from "./retarget-profile.js";
 import { suggestBodyAliases } from "./retarget-hand-names.js";
 import { appError } from "./i18n.js";
+import { characterHeightScale } from "./paired-camera.js";
 
 const JOINTS = 52;
 const UP = new Vector3(0, 1, 0);
@@ -402,6 +403,7 @@ export function createFbxCharacterRetarget(root, asset, motion, { poseOffsets = 
   const targetSole = Math.min(...probes.flat(2).map((item) => item.y));
   const sourceSole = Number.isFinite(restFloor) ? restFloor : Math.min(source[10].y, source[11].y) - 0.02;
   const sourceHipHeight = source[0].y - sourceSole;
+  const cameraScale = characterHeightScale(source[15], sourceSole, target[map[15]], targetSole);
   const hipDelta = slot(0).bindPosition.y - targetSole - sourceHipHeight;
   if (!Number.isFinite(hipDelta) || !(sourceHipHeight > 0)) throw new Error("Invalid FBX or motion body height.");
   const support = Number.isFinite(floor) && contacts?.length === frames * 4;
@@ -782,5 +784,6 @@ export function createFbxCharacterRetarget(root, asset, motion, { poseOffsets = 
   return { apply, setPoseOffsets, editableCorrections, mirrorRotation: edits.mirrorRotation, matched: map.filter((i) => i >= 0).length,
     sourceToTarget: Array.from(map), support, proportions, nativeIkAvailable:!!explicitControllers.length,
     rootMotionScale:proportions?.strideRatio,
+    cameraRig: cameraScale && { scale: cameraScale, pelvis: pelvis.node },
     rememberLibraryId: (id) => cacheLibrarySoles(soleId(id), soleCache.get(asset)) };
 }
