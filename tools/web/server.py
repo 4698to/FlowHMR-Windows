@@ -267,7 +267,7 @@ JOB_QUEUE = queue.Queue()
 _POSTPROCESS = None
 SELECTIONS = {}           # job_id -> {"event": Event, "people": list[int] | None}
 CANCEL_REQUESTS = set()
-SELECT_TIMEOUT_S = 600    # a job waiting for a person pick falls back to the default after this
+SELECT_TIMEOUT_S = 600    # MCP jobs have a bounded wait for a person selection.
 ACTIVE_STATUSES = {"queued", "running", "waiting_user", "cancel_requested", "uploading"}
 
 
@@ -516,7 +516,6 @@ def parse_params(src, base=None):
         "correction_preset": preset,
         "sole_fit": sole_fit_strength > 0,
         "sole_fit_strength": sole_fit_strength,
-        "manual_select": _to_bool(src.get("manual_select"), base.get("manual_select", True)),
         "static_camera": _to_bool(src.get("static_camera"), base["static_camera"] and vggt_interval == 0),
         "torso_opt": _to_bool(src.get("torso_opt"), base["torso_opt"]),
         "crossing_opt": _to_bool(src.get("crossing_opt"), base["crossing_opt"]),
@@ -701,7 +700,7 @@ def _build_job(filename, params, ext):
     job = {
         "id": job_id, "filename": filename, "params": params, "ext": ext, "recovered": False,
         "status": "queued", "message": "Waiting in queue", "error": None, "progress": 0,
-        "source": "desktop", "selection_policy": "legacy",
+        "source": "desktop", "selection_policy": "explicit",
         "created": time.time(), "started": None, "finished": None,
         "num_frames": None, "fps": 30, "has_fbx": False,
         "candidates": None, "default_person": None, "selected_person": None, "selection_auto": False,
@@ -888,7 +887,7 @@ def _confirm_people(job_id, result, candidates, people, *, automatic):
             child = _build_job(filename, params.copy(), ext)
             child.update(_selected_track(candidate), person_batch=job_id,
                          source=parent.get('source', 'desktop'),
-                         selection_policy=parent.get('selection_policy', 'legacy'),
+                         selection_policy=parent.get('selection_policy', 'explicit'),
                          video_size=[result.width, result.height], source_frames=result.total_frames,
                          body_reference=reference)
             child_stage = os.path.join(staging, child["id"])
@@ -1189,6 +1188,8 @@ def run_job(job_id):
     with JOBS_LOCK:
         job = JOBS[job_id]
         params = job["params"]
+        is_mcp = job.get("source") == "mcp"
+        manual_select = not is_mcp or job.get("selection_policy") != "automatic"
         sam_backend = params.get("sam_backend", "gpu")
         requested_reference = job.get("body_reference")
         if not isinstance(requested_reference, str) or requested_reference not in SMPLH_FILES:
@@ -1282,7 +1283,7 @@ def run_job(job_id):
                                 if suggested else f"检测到 {len(candidates)} 条人物轨迹，请勾选要生成的轨迹"))
             _persist_job_locked(job)
         try:
-            slot["event"].wait(SELECT_TIMEOUT_S)
+            slot["event"].wait(SELECT_TIMEOUT_S if is_mcp else None)
         finally:
             with JOBS_LOCK:
                 people = slot["people"]
@@ -1294,15 +1295,14 @@ def run_job(job_id):
                 stage["status"] = "running"
                 SELECTIONS.pop(job_id, None)
         _raise_if_cancelled(job_id)
-        if people is None and (slot.get("grouping") or JOBS[job_id].get('selection_policy') == 'explicit'):
+        if people is None:
             raise UserMessage('等待人物选择已超时，请重跑任务并重新选择。', 'selection_timeout')
-        chosen = people or [default_idx]
         if joined:
             candidates = list(candidates)
             for candidate in joined:
                 candidates[candidate["index"]] = candidate
-        _confirm_people(job_id, result, candidates, chosen, automatic=people is None)
-        return chosen[0]
+        _confirm_people(job_id, result, candidates, people, automatic=False)
+        return people[0]
 
     engine = get_engine(job_id, requested_reference, sam_backend=sam_backend)
     _raise_if_cancelled(job_id)
@@ -1328,7 +1328,7 @@ def run_job(job_id):
         static_camera=params.get("static_camera", False),
         sam_chunk_size=params.get("sam_chunk_size", DEFAULT_PARAMS["sam_chunk_size"]),
         sam_hand_stride=params["sam_hand_stride"],
-        person_selector=select_person if params.get("manual_select", True) or get_job(job_id).get("restore_fragments") else None,
+        person_selector=select_person if manual_select or get_job(job_id).get("restore_fragments") else None,
         progress_callback=on_progress,
         cancel_check=lambda: _raise_if_cancelled(job_id),
         details_callback=lambda details: update_job(job_id, **details),
@@ -1554,14 +1554,14 @@ def api_mcp_parameters():
 
 
 def submission_metadata(values, params):
-    if values.get('source') != 'mcp':
-        return {'source': 'desktop', 'selection_policy': 'legacy'}
-    require_mcp_service(max_bytes=None)
-    policy = values.get('selection_policy', 'explicit')
-    if policy not in ('explicit', 'automatic'):
-        raise UserMessage('Invalid selection policy.', 'param_selection_policy')
+    source, policy = 'desktop', 'explicit'
+    if values.get('source') == 'mcp':
+        require_mcp_service(max_bytes=None)
+        source, policy = 'mcp', values.get('selection_policy', 'explicit')
+        if policy not in ('explicit', 'automatic'):
+            raise UserMessage('Invalid selection policy.', 'param_selection_policy')
     params['manual_select'] = policy == 'explicit'
-    return {'source': 'mcp', 'selection_policy': policy}
+    return {'source': source, 'selection_policy': policy}
 
 
 @app.route('/api/mcp', methods=['GET', 'POST'])
@@ -2168,7 +2168,7 @@ def api_rerun(job_id):
     if not isinstance(body, dict):
         return api_error("param_invalid", "生成参数无效。", 400)
     if is_scene:
-        body = {**body, "manual_select": True, "reselect_person": True}
+        body = {**body, "reselect_person": True}
     try:
         params = parse_params(body, base=src["params"])
         metadata = submission_metadata(body, params)
@@ -2306,9 +2306,7 @@ def api_select(job_id):
             except TrackJoinError as error:
                 return api_error(error.code, "Cannot safely join these track fragments.", 400)
             chosen = [candidate["index"] for candidate in joined]
-        if validate_only:
-            slot["grouping"] = True
-        else:
+        if not validate_only:
             slot["joined"] = joined
             slot["people"] = chosen
             slot["event"].set()

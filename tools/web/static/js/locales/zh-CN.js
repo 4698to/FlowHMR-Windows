@@ -352,8 +352,6 @@ export default Object.freeze({
   "camera.manual": "运动相机 · 手动采样",
   "camera.interval": "每 N 帧估计一次相机",
   "camera.static_hint": "仅平移、推拉或缩放通常选固定机位。镜头明显转向、俯仰或滚转时，选运动相机。",
-  "person.manual": "手动选人",
-  "person.manual_hint": "检测到多人时暂停，可勾选一人或多人",
   "settings.generate": "生成 3D 动作",
   "settings.smoothing": "滤波强度",
   "settings.smoothing_value": "精确输入滤波强度",

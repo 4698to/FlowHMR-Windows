@@ -61,6 +61,7 @@ function floorGridTexture(renderer, size, dark) {
 export function initViewer(preview) {
   const { video, clock } = preview;
   const container = $("viewer");
+  const sourceFrameOverlay = $("sourceCameraFrame");
   const scrub = $("scrub");
   // Distant shots still need to distinguish closely spaced hair and clothing.
   const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
@@ -290,7 +291,7 @@ export function initViewer(preview) {
       camera = orbitCamera;
       controls.object = camera;
       controls.enabled = true;
-      $('sourceCameraView').setAttribute('aria-pressed', 'false');
+      sourceCamera.syncView();
       if (usedSourceBody) {
         syncSkeletonDisplay();
         state.prevRoot.copy(frameRoot(state.visualFrame));
@@ -414,7 +415,7 @@ export function initViewer(preview) {
       sourceView = true;
       controls.enabled = false;
       camera = recoveredCamera;
-      $('sourceCameraView').setAttribute('aria-pressed', 'true');
+      sourceCamera.syncView();
       if (sourceBodyPreview()) {
         syncSkeletonDisplay();
         updateFrameRoot(state.visualFrame);
@@ -1075,6 +1076,19 @@ export function initViewer(preview) {
     preview.showPreviewIssue(m("source.sync_stalled"));
   }
 
+  let sourceFrameBounds = null;
+  function updateSourceFrameBounds(rect) {
+    if (rect === sourceFrameBounds) return;
+    if (rect && sourceFrameBounds && rect.every((value, index) => value === sourceFrameBounds[index])) return;
+    sourceFrameBounds = rect;
+    if (rect) {
+      const [left, bottom, width, height] = rect;
+      Object.assign(sourceFrameOverlay.style, { left: `${left}px`, bottom: `${bottom}px`,
+        width: `${width}px`, height: `${height}px` });
+    }
+    show(sourceFrameOverlay, !!rect);
+  }
+
   function tick(t) {
     renderRequest = 0;
     const dt = state.lastT ? (t - state.lastT) / 1000 : 0;
@@ -1097,11 +1111,13 @@ export function initViewer(preview) {
       scene.fog.near = sourceView ? 100000 : d + 6;
       scene.fog.far = sourceView ? 100001 : d + 30;
       renderer.setScissorTest(false);
-      renderer.setViewport(0, 0, container.clientWidth, container.clientHeight);
+      const width = container.clientWidth, height = container.clientHeight;
+      const rect = sourceView && sourceFrameValid ? sourceViewport(width, height, cameraData.image_size_hw) : null;
+      updateSourceFrameBounds(rect);
+      renderer.setViewport(0, 0, width, height);
       if (sourceView) {
         renderer.clear();
-        if (sourceFrameValid) {
-          const rect = sourceViewport(container.clientWidth, container.clientHeight, cameraData.image_size_hw);
+        if (rect) {
           renderer.setViewport(...rect);
           renderer.setScissor(...rect);
           renderer.setScissorTest(true);

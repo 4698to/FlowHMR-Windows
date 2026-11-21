@@ -352,8 +352,6 @@ export default Object.freeze({
   "camera.manual": "運動相機 · 手動取樣",
   "camera.interval": "每 N 幀估計一次相機",
   "camera.static_hint": "僅平移、推拉或縮放通常選固定機位。鏡頭明顯轉向、俯仰或翻滾時，選運動相機。",
-  "person.manual": "手動選人",
-  "person.manual_hint": "偵測到多人時暫停，可勾選一人或多人",
   "settings.generate": "生成 3D 動作",
   "settings.smoothing": "濾波強度",
   "settings.smoothing_value": "精確輸入濾波強度",

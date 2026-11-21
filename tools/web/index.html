@@ -180,7 +180,7 @@
         </div>
         <div class="source-camera-actions">
           <button type="button" class="btn-secondary small" id="sourceCameraRetry" disabled>生成相机</button>
-          <button type="button" class="btn-secondary small" id="sourceCameraView" aria-pressed="false" disabled data-i18n="camera.preview">原片机位预览</button>
+          <button type="button" class="btn-secondary small" id="sourceCameraView" aria-controls="viewer" aria-pressed="false" disabled data-i18n="camera.preview">原片机位预览</button>
           <button type="button" class="btn-secondary small hidden" id="sourceCameraCancel" data-i18n="camera.cancel_recompute">停止计算</button>
           <details class="editor-menu source-camera-export" id="sourceCameraExportMenu">
             <summary id="sourceCameraExport" aria-disabled="true" data-i18n="camera.export">导出相机</summary>
@@ -195,13 +195,6 @@
             </div>
           </details>
         </div>
-      </div>
-      <div class="setting-row person-setting">
-        <div>
-          <div class="setting-label" data-i18n="person.manual">手动选人</div>
-          <div class="setting-help" data-i18n="person.manual_hint">检测到多人时暂停，可勾选一人或多人</div>
-        </div>
-        <button type="button" class="toggle" id="optManual" role="switch" aria-label="手动选人" aria-checked="true" data-i18n-label="person.manual"><span class="toggle-knob"></span></button>
       </div>
       <div class="setting-row person-setting" title="用 SAM2.1 分割人物、在遮挡时保持身体尺度，并合并被切断的跟踪身份。适合多人交叉、互相遮挡的素材；会增加一次分割的耗时。仅作实验用途。" data-i18n-title="crossing.tooltip">
         <div>
@@ -424,6 +417,7 @@
     <div class="source-camera-warning hidden" id="sourceCameraWarning" role="status"></div>
     <div class="viewer-wrap">
       <div id="viewer" tabindex="-1"></div>
+      <div class="source-camera-frame hidden" id="sourceCameraFrame" aria-hidden="true"></div>
       <div class="viewport-label"><strong id="viewportName" data-i18n="view.user_perspective">用户透视</strong><span id="viewportObject" data-i18n="view.scene">场景集合</span></div>
       <div class="viewport-toolbar" aria-label="视窗工具" data-i18n-label="view.tools">
         <button type="button" class="editor-icon" data-mouse-mode="rotate" aria-pressed="false" aria-label="旋转视图" title="左键旋转，中键平移" data-i18n-label="view.rotate" data-i18n-title="view.rotate_hint"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M15.5 6.5A6.4 6.4 0 1 0 16 12M15.5 2.5v4h-4"/></svg></button>
@@ -447,6 +441,7 @@
         <label><input type="checkbox" id="optFollow" checked> <span data-i18n="view.follow">跟随</span></label>
         <label><input type="checkbox" id="optSync" checked> <span data-i18n="view.sync">同步视频</span></label>
         <label><input type="checkbox" id="optAudio" checked> <span data-i18n="view.audio">原声</span></label>
+        <button type="button" class="btn-secondary small viewer-source-camera hidden" id="sourceCameraQuickView" aria-controls="viewer" aria-pressed="false" disabled data-i18n="view.source_camera">原片机位</button>
       </div>
     </div>
   </section>

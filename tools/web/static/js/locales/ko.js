@@ -352,8 +352,6 @@ export default Object.freeze({
   "camera.manual": "이동 카메라 · 수동 샘플링",
   "camera.interval": "N프레임마다 카메라 추정",
   "camera.static_hint": "평행 이동, 돌리 또는 줌만 있다면 고정 카메라를 사용하세요. 카메라가 뚜렷하게 회전하거나 기울면 이동 카메라를 선택하세요.",
-  "person.manual": "수동 인물 선택",
-  "person.manual_hint": "여러 인물이 감지되면 일시 정지하여 추적할 인물을 선택합니다",
   "settings.generate": "3D 모션 생성",
   "settings.smoothing": "스무딩 강도",
   "settings.smoothing_value": "스무딩 강도 입력",

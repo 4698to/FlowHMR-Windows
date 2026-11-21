@@ -182,7 +182,7 @@ bus.on("file:cleared", () => {
 });
 bus.on("preview:pick", (i) => person.select(i));
 bus.on("person:confirmed", () => poll());
-bus.on("person:reselect", () => rerunCurrent({ manual_select: true, reselect_person: true }));
+bus.on("person:reselect", () => rerunCurrent({ reselect_person: true }));
 
 $("btnSubmit").addEventListener("click", submit);
 $("btnDefaults").addEventListener("click", () => params.reset());

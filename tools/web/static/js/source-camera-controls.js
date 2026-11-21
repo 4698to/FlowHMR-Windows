@@ -5,17 +5,30 @@ import { $, downloadBlob, safeStem, show } from './utils.js';
 
 export function bindSourceCamera({ showing, enter, exit, replaceCamera, exportTransform }) {
   const view = $('sourceCameraView'), retry = $('sourceCameraRetry'), cancel = $('sourceCameraCancel');
+  const quickView = $('sourceCameraQuickView');
+  const viewButtons = [view, quickView];
   const bar = $('sourceCameraBar'), notice = $('sourceCameraOperation');
   const exportMenu = $('sourceCameraExportMenu'), exportToggle = $('sourceCameraExport');
   let current = null, previewHint = '';
+
+  function syncView() {
+    const pressed = String(showing());
+    for (const button of viewButtons) button.setAttribute('aria-pressed', pressed);
+  }
 
   function render() {
     const { status, data, opening, preparing, cancelling, exporting, previewReady, error } = current ?? {};
     const cached = !!data || cameraAvailable(status);
     const active = cameraActive(status);
     show(bar, !!current);
-    view.disabled = !cached || !previewReady || !!opening;
-    setAttr(view, 'title', cached && !previewReady ? m('view.loading') : cached ? previewHint : m('camera.none'));
+    const viewTitle = cached && !previewReady ? m('view.loading')
+      : cached ? previewHint || m('camera.preview') : m('camera.none');
+    for (const button of viewButtons) {
+      button.disabled = !cached || !previewReady || !!opening;
+      setAttr(button, 'title', viewTitle);
+    }
+    syncView();
+    show(quickView, cached);
     setText(retry, m(cached ? 'camera.recompute' : 'camera.generate'));
     retry.disabled = !current || !!preparing || active;
     exportToggle.setAttribute('aria-disabled', String(!cached || !!exporting));
@@ -74,7 +87,7 @@ export function bindSourceCamera({ showing, enter, exit, replaceCamera, exportTr
     return api.prepareCamera(session.id, session.controller.signal, (status) => receive(session, status), { force });
   }
 
-  view.onclick = async () => {
+  const toggleView = async () => {
     const session = current;
     if (!session || view.disabled) return;
     if (showing()) { exit(); return; }
@@ -96,6 +109,7 @@ export function bindSourceCamera({ showing, enter, exit, replaceCamera, exportTr
       if (current === session) render();
     }
   };
+  for (const button of viewButtons) button.onclick = toggleView;
 
   retry.onclick = async () => {
     const session = current;
@@ -159,6 +173,7 @@ export function bindSourceCamera({ showing, enter, exit, replaceCamera, exportTr
 
   render();
   return {
+    syncView,
     select(id, job = {}, previewReady = true) {
       current?.controller.abort();
       current = id ? { id, filename: job.filename, status: cameraStatusForJob(job), previewReady,

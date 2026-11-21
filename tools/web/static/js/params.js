@@ -1,4 +1,4 @@
-// "Settings" card: person selection, camera mode, sampling and post-processing.
+// "Settings" card: camera mode, sampling and post-processing.
 import { $, show } from "./utils.js";
 import { appError, message as m, setAttr, setText, t } from "./i18n.js";
 
@@ -28,7 +28,6 @@ function samChunkSize(value) {
 }
 
 export function initParams(defaults, manualBatchDefault, hybridAvailable = false, cameraOnCpuForAmdIgpu = false) {
-  const manual = bindToggle("optManual");
   const post = bindToggle("optPostprocess");
   const hamer = bindToggle("optHamer");
   const hamerButton = $("optHamer"), hamerStride = $("optHamerStride");
@@ -110,7 +109,6 @@ export function initParams(defaults, manualBatchDefault, hybridAvailable = false
 
   const apply = (p, correction, prefs) => {
     const chunkSize = samChunkSize(p.sam_chunk_size ?? prefs?.manualBatch ?? manualBatchDefault);
-    manual.set(p.manual_select ?? true);
     post.set(!$("optPostprocess").disabled && !!p.postprocess);
     hamer.set(!hamerButton.disabled && !!p.hamer);
     torso.set(!torsoButton.disabled && !!p.torso_opt);
@@ -145,7 +143,6 @@ export function initParams(defaults, manualBatchDefault, hybridAvailable = false
     if (post.get() && !validStrength(strength)) throw appError("server.param_sole_fit");
     if (!validStrength(smoothing.valueAsNumber)) throw appError("settings.smoothing_invalid");
     const out = {
-      manual_select: manual.get(),
       postprocess: post.get(),
       hamer: !hamerButton.disabled && hamer.get(),
       hamer_stride: Number(hamerStride.value),
@@ -214,7 +211,7 @@ export function initParams(defaults, manualBatchDefault, hybridAvailable = false
     rememberSettings();
   });
   for (const input of [footLockPreset, hamerStride, samHandStride, samBackend]) input.addEventListener("change", rememberSettings);
-  for (const id of ["optManual", "optPostprocess", "optHamer", "optTorso", "optCrossing", "optSamAuto"]) $(id).addEventListener("click", rememberSettings);
+  for (const id of ["optPostprocess", "optHamer", "optTorso", "optCrossing", "optSamAuto"]) $(id).addEventListener("click", rememberSettings);
 
   const suggestCorrectionHeight = (report) => {
     if (report?.automatic && correctionGround.value === "auto") correctionHeight.value = report.floor_m.toFixed(3);

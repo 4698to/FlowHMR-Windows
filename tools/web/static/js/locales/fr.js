@@ -352,8 +352,6 @@ export default Object.freeze({
   "camera.manual": "Caméra mobile · échantillonnage manuel",
   "camera.interval": "Estimer la caméra toutes les N images",
   "camera.static_hint": "Choisissez Caméra fixe pour un déplacement, un travelling ou un zoom. Si la caméra pivote, s’incline ou roule visiblement, choisissez Caméra mobile.",
-  "person.manual": "Sélection manuelle",
-  "person.manual_hint": "Suspend la tâche si plusieurs personnes sont détectées pour choisir qui suivre",
   "settings.generate": "Générer le mouvement 3D",
   "settings.smoothing": "Intensité du lissage",
   "settings.smoothing_value": "Saisir l’intensité du lissage",

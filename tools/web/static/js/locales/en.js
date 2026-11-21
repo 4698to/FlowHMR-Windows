@@ -352,8 +352,6 @@ export default Object.freeze({
   "camera.manual": "Moving camera · Manual sampling",
   "camera.interval": "Estimate camera every N frames",
   "camera.static_hint": "Use Fixed camera for translation, dolly or zoom. Choose Moving camera when the camera clearly rotates, tilts or rolls.",
-  "person.manual": "Select people manually",
-  "person.manual_hint": "Pause when several people are detected so you can choose who to track",
   "settings.generate": "Generate 3D motion",
   "settings.smoothing": "Smoothing strength",
   "settings.smoothing_value": "Enter smoothing strength",

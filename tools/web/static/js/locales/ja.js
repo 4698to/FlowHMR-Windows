@@ -352,8 +352,6 @@ export default Object.freeze({
   "camera.manual": "移動カメラ・手動サンプリング",
   "camera.interval": "N フレームごとにカメラを推定",
   "camera.static_hint": "平行移動やドリー、ズームだけなら通常は固定カメラを使います。明らかな首振り・傾き・ロールがあれば移動カメラを選びます。",
-  "person.manual": "人物を手動選択",
-  "person.manual_hint": "複数の人物が検出された場合、一時停止して対象を選びます",
   "settings.generate": "3D モーションを生成",
   "settings.smoothing": "平滑化の強さ",
   "settings.smoothing_value": "平滑化の強さを入力",

@@ -575,6 +575,9 @@ body { height: 100dvh; }
 .viewer-wrap, :root[data-theme="dark"] .viewer-wrap {
   min-height: 0; border: 0; border-radius: 0; background: var(--timeline-bg);
 }
+.source-camera-frame {
+  position: absolute; border: 2px solid var(--accent); pointer-events: none;
+}
 .viewport-label { position: absolute; top: 8px; left: 10px; font-size: 11px; color: var(--text); pointer-events: none; }
 .viewport-label strong { font-weight: 600; }
 .viewport-label span { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
@@ -609,6 +612,8 @@ body { height: 100dvh; }
 .viewer-tools input { accent-color: var(--accent); }
 .viewer-tools label { white-space: nowrap; }
 .viewer-tools label:has(input:disabled) { opacity: .55; cursor: default; }
+.viewer-tools .viewer-source-camera { padding: 2px 7px; border-radius: 4px; white-space: nowrap; }
+.viewer-tools .viewer-source-camera[aria-pressed="true"] { border-color: var(--accent); color: var(--text); }
 .viewer-hint, :root[data-theme="dark"] .viewer-hint { color: var(--muted); background: var(--editor-head); border-radius: 4px; }
 
 .timeline-editor {
