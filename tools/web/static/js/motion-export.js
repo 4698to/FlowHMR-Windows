@@ -22,10 +22,11 @@ export function initMotionExport(getBodyVariant, viewer) {
   const chooseCharacter = $("vmdChooseCharacter");
   const includeCamera = $('includeCamera');
   const formats = [...format.options];
+  const currentFbxOption = formats.find(({ value }) => value === "retarget_fbx");
   let preferred = localStorage.getItem(FORMAT_STORAGE);
   if (preferred === "mixamo_iclone") preferred = "mixamo";
   let result = null, pending = null, entries = [], multiPeople = [], single = false;
-  let pairedExport = false;
+  let pairedExport = false, formatChanged = false;
 
   skin.checked = localStorage.getItem(SKIN_STORAGE) === "on";
   const savedPose = localStorage.getItem(POSE_STORAGE);
@@ -35,16 +36,32 @@ export function initMotionExport(getBodyVariant, viewer) {
   const targets = () => viewer.getPmxActors(selected());
   const retargeted = () => viewer.getRetargetActors(selected());
   const fbxActor = (profile) => viewer.getFbxActor(selected(), profile);
-  function selectMode(next) {
+  function selectMode(next, person) {
     if (next === single) return;
     if (next) multiPeople = selected();
-    const keep = next ? [multiPeople[0] ?? entries[0]?.input.value] : multiPeople;
+    const keep = next ? [person ?? multiPeople[0] ?? entries[0]?.input.value] : multiPeople;
     for (const { input } of entries) {
+      input.checked = false;
       input.type = next ? "radio" : "checkbox";
       if (next) input.name = "fbx-export-person"; else input.removeAttribute("name");
       input.checked = keep.includes(input.value);
     }
     single = next;
+  }
+  function selectAppliedRetargetFbx() {
+    if (currentFbxOption.disabled) return false;
+    const people = selected();
+    const choices = people.length > 1 ? people.map(person => [person]) : [people];
+    const eligible = choices.filter((choice) => {
+      const actor = viewer.getFbxActor(choice, "retarget_fbx");
+      return !!actor?.poseOffsets?.retarget && !actor.retargetTrial;
+    });
+    const focused = String(viewer.focusedPerson);
+    const choice = eligible.find(([person]) => person === focused) ?? (eligible.length === 1 ? eligible[0] : null);
+    if (!choice) return false;
+    selectMode(true, choice[0]);
+    format.value = "retarget_fbx";
+    return true;
   }
   function showError(value = "") {
     setText(error, value);
@@ -126,20 +143,25 @@ export function initMotionExport(getBodyVariant, viewer) {
     if (!result || dialog.open) return;
     if (pairedExport) includeCamera.checked = false;
     pairedExport = withCamera;
+    formatChanged = false;
     dialog.returnValue = "";
     showError();
     vmdTarget.value = targets().length ? "target" : "generic";
     mixamoRig.value = "target";
-    // Resolve the default after preview and character restoration have run.
-    const currentFbx = formats.find(({value}) => value === "retarget_fbx");
     if (withCamera) {
       const paired = formats.filter((option) => !option.disabled && CAMERA_FORMATS.includes(option.value));
       format.value = (paired.find((option) => option.value === preferred) ?? paired[0])?.value ?? "";
       includeCamera.checked = true;
-    } else if ((!preferred || preferred === "retarget_glb") && !currentFbx.disabled && fbxActor("retarget_fbx")) {
-      format.value = "retarget_fbx";
-    } else if (preferred === "retarget_glb" && retargeted().length) format.value = preferred;
-    else if (preferred && formats.some((option) => !option.disabled && option.value === preferred)) format.value = preferred;
+    } else if (!selectAppliedRetargetFbx()) {
+      const actor = currentFbxOption.disabled ? null : fbxActor("retarget_fbx");
+      const currentReady = actor && !actor.retargetTrial;
+      if (currentReady && (!preferred || preferred === "retarget_glb")) format.value = "retarget_fbx";
+      else if (preferred === "retarget_glb" && retargeted().length) format.value = preferred;
+      else {
+        const available = formats.filter(option => !option.disabled && (option !== currentFbxOption || currentReady));
+        format.value = (available.find(option => option.value === preferred) ?? available[0])?.value ?? "";
+      }
+    }
     sync();
     dialog.showModal();
   }
@@ -160,10 +182,12 @@ export function initMotionExport(getBodyVariant, viewer) {
   };
   window.addEventListener("flowhmr:characterchange", () => {
     if (!dialog.open || pending) return;
+    if (!pairedExport && !formatChanged && !includeCamera.checked) selectAppliedRetargetFbx();
     vmdTarget.value = targets().length ? "target" : "generic";
     sync();
   });
   format.addEventListener("change", () => {
+    formatChanged = true;
     showError();
     sync();
   });
@@ -289,7 +313,7 @@ export function initMotionExport(getBodyVariant, viewer) {
       const availableByFormat = { vmd: !!job.has_vmd, vrma: !!job.has_vrma, npz: !!job.has_vmd };
       for (const option of formats) option.disabled = !(availableByFormat[option.value] ?? job.has_fbx);
       const available = formats.filter((option) => !option.disabled && option.value!=="retarget_glb");
-      format.value = (available.find((option) => option.value === preferred) ?? available[0])?.value ?? "";
+      format.value = available[0]?.value ?? "";
       setPeople(job.scene);
       setButtons(!!available.length);
       sync();

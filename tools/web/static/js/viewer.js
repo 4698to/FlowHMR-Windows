@@ -1307,6 +1307,7 @@ export function initViewer(preview) {
       const actor = person == null ? null : actors.find((a) => String(a.number) === String(person));
       return character.open(actor?.id);
     },
+    get focusedPerson() { return character.focused?.number; },
     getFbxActor(people, profile) {
       if (state.scene && people.length !== 1) return null;
       const actor = state.scene ? actors.find((a) => String(a.number) === String(people[0])) : actors[0];
@@ -1315,7 +1316,7 @@ export function initViewer(preview) {
         ? entry.asset.profile === "custom" && !entry.poseOffsets?.retarget
         : entry.asset.profile !== profile)) return null;
       return { asset:entry.asset, libraryId:entry.libraryId, motion:entry.motion, poseOffsets:entry.poseOffsets,
-        sceneTrack:actor.sceneTrack, sourceStart:sourceStart(actor.meta) };
+        retargetTrial:entry.retargetTrial, sceneTrack:actor.sceneTrack, sourceStart:sourceStart(actor.meta) };
     },
     getRetargetActors(people) {
       const selected = new Set(people.map(String));

@@ -804,6 +804,7 @@ export function initPreviewCharacter(getActors, onChange, onRestoreError) {
         else before?.mesh.removeFromParent();
         trial=next;
         trialBinding=signature(offsets.retarget);
+        next.retargetTrial = !final;
         actor.character=next;
         actor.group.add(next.mesh);
         notifyChange();
