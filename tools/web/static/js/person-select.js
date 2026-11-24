@@ -32,6 +32,7 @@ export function initPersonSelect(bus) {
   let mode = "hidden";      // "hidden" | "choosing" | "locked"
   let submitting = false, confirmed = false;
   let suggested = null;
+  let previewChoice = false;   // picked on the first frame, before full-video tracking
 
   const list = $("personList");
   const joinTracks = $("personJoinTracks");
@@ -96,7 +97,7 @@ export function initPersonSelect(bus) {
     const assignment = new Map();
     groups.forEach((group, number) => group.forEach(index => assignment.set(index, number + 1)));
     joinTracks.disabled = busy;
-    show("personJoinRow", candidates.length > 1);
+    show("personJoinRow", candidates.length > 1 && !previewChoice);
     show("personJoinHelp", joining);
     show(groupList, groups.length > 0);
     groupList.replaceChildren(...groups.map((group, index) => {
@@ -243,6 +244,7 @@ export function initPersonSelect(bus) {
         groups.length = 0;
         submitting = confirmed = false;
         suggested = null;
+        previewChoice = false;
 
         joinTracks.checked = false;
         setError("");
@@ -250,6 +252,7 @@ export function initPersonSelect(bus) {
       if (job.status === "waiting_user" && cands.length) {
         if (mode !== "choosing" || changedJob) {
           candidates = cands;
+          previewChoice = !!job.preview_selection;
           previewIndex = defaultIdx = job.default_person ?? 0;
           suggested = Array.isArray(job.suggested_join) && job.suggested_join.length >= 2
             ? job.suggested_join : null;
@@ -265,7 +268,7 @@ export function initPersonSelect(bus) {
         const changed = mode !== "locked" || lockedIndex !== job.selected_person;
         lockedIndex = job.selected_person;
         if (changed) {
-          const candidate = job.track_fragments?.length ? job.person_track
+          const candidate = job.track_fragments?.length || previewChoice ? job.person_track
             : candidates[lockedIndex] ?? cands[lockedIndex] ?? job.person_track;
           setError("");
           setMode("locked", job, candidate);
@@ -288,6 +291,7 @@ export function initPersonSelect(bus) {
       groups.length = 0;
       submitting = confirmed = false;
       suggested = null;
+      previewChoice = false;
 
       joinTracks.checked = false;
       setError("");

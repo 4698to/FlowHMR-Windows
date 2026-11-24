@@ -1,6 +1,7 @@
 param(
     [ValidateRange(1, 65535)][int]$Port = 60550,
     [Alias('NoBrowser')][switch]$ServerOnly,
+    [switch]$Foreground,
     [ValidatePattern('^Local\\FlowHMR-backend-[0-9a-f]{32}$')][string]$DesktopJobName
 )
 $ErrorActionPreference = 'Stop'
@@ -12,15 +13,27 @@ if ($DesktopJobName) {
     Join-FlowHMRDesktopJob $DesktopJobName
 }
 $pythonExe = Get-FlowHMRConsoleRuntime $projectRoot
-if (-not $ServerOnly) {
+$openBrowser = $false
+if (-not $ServerOnly -and -not $Foreground) {
     $launcher = Join-Path $projectRoot 'FlowHMR.exe'
     if (Test-Path -LiteralPath $launcher -PathType Leaf) {
         Start-Process -FilePath $launcher -ArgumentList @('--port',"$Port") -WorkingDirectory $projectRoot -WindowStyle Normal
         exit 0
     }
-    $desktopExe = Get-FlowHMRDesktopRuntime $projectRoot
-    Start-Process -FilePath $desktopExe -ArgumentList @('-I','tools\windows\desktop_launcher.pyw','--port',"$Port") -WorkingDirectory $projectRoot -WindowStyle Normal
-    exit 0
+    $guiReady = $false
+    try {
+        & $pythonExe -c "import pythonnet, webview" 2>$null
+        $guiReady = ($LASTEXITCODE -eq 0)
+    } catch {}
+    if ($guiReady) {
+        $desktopExe = Get-FlowHMRDesktopRuntime $projectRoot
+        Start-Process -FilePath $desktopExe -ArgumentList @('-I','tools\windows\desktop_launcher.pyw','--port',"$Port") -WorkingDirectory $projectRoot -WindowStyle Normal
+        exit 0
+    }
+    Write-Host 'Desktop GUI dependencies are not installed; starting the web service instead.'
+    Write-Host "Open http://127.0.0.1:$Port in a browser. Pass -ServerOnly to skip this check."
+    $ServerOnly = $true
+    $openBrowser = $true
 }
 $env:PYTHONUTF8 = '1'
 $env:PYTHONUNBUFFERED = '1'
@@ -33,6 +46,30 @@ $url = "http://127.0.0.1:$Port"
 $logDir = Join-Path $projectRoot 'logs'
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 $stateFile = Join-Path $logDir 'web-process.json'
+if ($Foreground) {
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
+    try { $listener.Start() } catch { throw "Port $Port is occupied. Close the other FlowHMR window or pass -Port with another port." } finally { $listener.Stop() }
+    Write-Host "Starting FlowHMR on $url"
+    $lanIps = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notmatch '^(127\.|169\.254\.)' -and $_.AddressState -eq 'Preferred' -and $_.InterfaceAlias -notmatch 'vEthernet|Loopback|VMware|VirtualBox|WSL|Bluetooth' } | Select-Object -ExpandProperty IPAddress
+    foreach ($lanIp in $lanIps) { Write-Host "LAN access: http://${lanIp}:$Port" }
+    Write-Host 'Keep this window open. Close it (or press Ctrl+C) to stop the service.'
+    $serverProcess = Start-Process -FilePath $pythonExe -ArgumentList @('-u','app.py','--host','0.0.0.0','--port',"$Port",'--sam-chunk-default','24') -WorkingDirectory $projectRoot -NoNewWindow -PassThru
+    @{pid=$serverProcess.Id;port=$Port;root=$projectRoot} | ConvertTo-Json | Set-Content -LiteralPath $stateFile -Encoding UTF8
+    $deadline = (Get-Date).AddMinutes(5)
+    while (-not $serverProcess.HasExited -and (Get-Date) -lt $deadline) {
+        try {
+            if ((Invoke-WebRequest -Uri "$url/api/info" -UseBasicParsing -TimeoutSec 2).StatusCode -eq 200) {
+                Write-Host "FlowHMR ready: $url"
+                Start-Process $url
+                break
+            }
+        } catch {}
+        Start-Sleep -Milliseconds 500
+    }
+    $serverProcess.WaitForExit()
+    Remove-Item -LiteralPath $stateFile -ErrorAction SilentlyContinue
+    exit $serverProcess.ExitCode
+}
 $serverProcess = $null
 if (Test-Path -LiteralPath $stateFile) {
     try {
@@ -55,7 +92,7 @@ if (Test-Path -LiteralPath $stateFile) {
                 }
                 throw
             }
-            if ($recorded.ExecutablePath -eq $pythonExe -and $recorded.CommandLine -match "\bapp\.py\b.*--host\s+127\.0\.0\.1\s+--port\s+$recordedPort\b") {
+            if ($recorded.ExecutablePath -eq $pythonExe -and $recorded.CommandLine -match "\bapp\.py\b.*--host\s+(?:127\.0\.0\.1|0\.0\.0\.0)\s+--port\s+$recordedPort\b") {
                 $serverProcess = $running
             }
         }
@@ -122,6 +159,7 @@ while ((Get-Date) -lt $deadline) {
         }
         if ($ready) {
             Write-Host "FlowHMR ready: $url"
+            if ($openBrowser) { Start-Process $url }
             exit 0
         }
     } catch {}

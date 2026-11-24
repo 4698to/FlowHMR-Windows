@@ -15,6 +15,7 @@ import copy
 import hashlib
 import hmac
 import json
+import logging
 import math
 import mimetypes
 import os
@@ -1246,6 +1247,17 @@ def run_job(job_id):
 
     def select_person(result, candidates, default_idx):
         """Pause for one or more choices; continue this single-person pipeline on the first."""
+        with JOBS_LOCK:
+            hint = JOBS.get(job_id, {}).pop("person_hint", None)
+        if hint is not None:
+            hinted = match_person_hint(candidates, hint)
+            if hinted is not None:
+                try:  # re-crop thumbnails under the full-video track indices the UI will show
+                    save_person_thumbnails(job_id, candidates)
+                except Exception:
+                    traceback.print_exc()
+                _confirm_people(job_id, result, candidates, [hinted], automatic=False)
+                return hinted
         previous = get_job(job_id).get("restore_fragments")
         if previous:
             keys = ("track_id", "start", "end")
@@ -1312,6 +1324,25 @@ def run_job(job_id):
         engine.postprocess = get_postprocess(
             params["correction_floor_m"], params["correction_preset"], sole_fit_strength=params["sole_fit_strength"],
         )
+    pending = get_job(job_id)
+    if (manual_select and not is_mcp and not params.get("crossing_opt")
+            and pending.get("selected_person") is None
+            and not pending.get("person_batch") and not pending.get("restore_fragments")):
+        from flowhmr.pipeline.v2m_inference import StageName
+        on_progress(StageName.DETECTION, 3, "正在检测首帧人物…")
+        preview = None
+        try:
+            preview = detect_first_frame_people(job_id, engine, params["start_frame"])
+        except JobCancelled:
+            raise
+        except Exception:  # the preview only shortens the wait; full detection still runs
+            traceback.print_exc()
+        if preview is not None and len(preview[0]) > 1:
+            chosen = wait_first_frame_pick(job_id, preview[0], preview[1], is_mcp)
+            update_job(job_id, person_hint={
+                "frame": int(preview[0][chosen]["frames"][0]),
+                "box": preview[0][chosen]["boxes"][0],
+            })
     if params.get("crossing_opt"):
         _raise_if_cancelled(job_id)
         update_job(job_id, message="人物交叉优化：准备 SAM2 分割与身份")
@@ -1451,6 +1482,115 @@ def save_person_thumbnails(job_id, candidates):
             write_image(os.path.join(out_dir, f"{c['index']}.jpg"), crop, [cv2.IMWRITE_JPEG_QUALITY, 88])
     finally:
         cap.release()
+
+
+def _box_iou(a, b):
+    ix1, iy1 = max(float(a[0]), float(b[0])), max(float(a[1]), float(b[1]))
+    ix2, iy2 = min(float(a[2]), float(b[2])), min(float(a[3]), float(b[3]))
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    if inter <= 0.0:
+        return 0.0
+    union = ((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter)
+    return float(inter / union) if union > 0 else 0.0
+
+
+def detect_first_frame_people(job_id, engine, start_frame):
+    """Detect people on the first processed frame so the user can choose before full tracking."""
+    import cv2
+    video = engine.proc.transcode(
+        input_video(job_id),
+        backup_dir=os.path.join(job_dir(job_id), os.path.splitext(os.path.basename(input_video(job_id)))[0]),
+        force_fps=30,
+    )
+    cap = cv2.VideoCapture(video)
+    try:
+        if start_frame:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(start_frame))
+        ok, frame = cap.read()
+        if not ok:
+            return None
+        width, height = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    finally:
+        cap.release()
+    results = engine.proc.detector.run_human_detection(
+        frame, det_cat_id=0, bbox_thr=0.4, nms_thr=0.3, default_to_full_image=False,
+    )
+    if results is None or not len(results):
+        return None
+    boxes = np.asarray(results, dtype=np.float64)
+    boxes = boxes[boxes[:, 4] >= 0.4]
+    if not len(boxes):
+        return None
+    areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+    boxes = boxes[np.argsort(-areas)]
+    frame_index = int(start_frame)
+    candidates = []
+    for index, row in enumerate(boxes):
+        box = row[:4]
+        candidates.append({
+            "index": index, "track_id": -1, "start": frame_index, "end": frame_index,
+            "preview_start": frame_index, "preview_end": frame_index, "num_frames": 1,
+            "avg_area": float((box[2] - box[0]) * (box[3] - box[1])),
+            "bytetrack_ids": [], "sam2_object_ids": [],
+            "frames": [frame_index], "boxes": [np.round(box, 1).tolist()],
+        })
+    return candidates, [width, height]
+
+
+def wait_first_frame_pick(job_id, candidates, video_size, is_mcp):
+    """Reuse the person-selection UI, but before the full-video detection runs."""
+    slot = {"event": threading.Event(), "people": None, "shots": ()}
+    try:
+        save_person_thumbnails(job_id, candidates)
+    except Exception:  # thumbnails are only a UI aid
+        traceback.print_exc()
+    with JOBS_LOCK:
+        if job_id in CANCEL_REQUESTS:
+            raise JobCancelled()
+        SELECTIONS[job_id] = slot
+        job = JOBS[job_id]
+        job["stages"][STAGE_INDEX["detection"]].update(status="waiting_user", paused_at=time.time())
+        job.update(status="waiting_user", candidates=candidates, default_person=0, suggested_join=None,
+                   video_size=video_size, preview_selection=True,
+                   message=f"首帧检测到 {len(candidates)} 人，请选择要生成的人物（选定后跟踪全片）")
+        _persist_job_locked(job)
+    try:
+        slot["event"].wait(SELECT_TIMEOUT_S if is_mcp else None)
+    finally:
+        with JOBS_LOCK:
+            people = slot["people"]
+            job = JOBS.get(job_id)
+            if job is not None:
+                stage = job["stages"][STAGE_INDEX["detection"]]
+                stage["paused_seconds"] = stage.get("paused_seconds", 0.0) + max(
+                    0.0, time.time() - stage.pop("paused_at", time.time()),
+                )
+                stage["status"] = "running"
+                job.update(status="running", candidates=None, suggested_join=None)
+                _persist_job_locked(job)
+            SELECTIONS.pop(job_id, None)
+    _raise_if_cancelled(job_id)
+    if people is None:
+        raise UserMessage('等待人物选择已超时，请重跑任务并重新选择。', 'selection_timeout')
+    return int(people[0])
+
+
+def match_person_hint(candidates, hint):
+    """Map the box the user picked on the first frame to a full-video track candidate."""
+    frame = int(hint["frame"])
+    box = np.asarray(hint["box"], dtype=np.float64)
+    best, best_iou = None, 0.0
+    for candidate in candidates:
+        frames = np.asarray(candidate["frames"], dtype=np.int64)
+        if not len(frames):
+            continue
+        k = int(np.argmin(np.abs(frames - frame)))
+        if abs(int(frames[k]) - frame) > 5:
+            continue
+        iou = _box_iou(box, np.asarray(candidate["boxes"][k], dtype=np.float64))
+        if iou > best_iou:
+            best, best_iou = candidate["index"], iou
+    return best if best_iou >= 0.3 else None
 
 
 # --------------------------------------------------------------------------- mesh export
@@ -3248,6 +3388,13 @@ def main():
     INSPECTION = PreviewInspection()
     threading.Thread(target=worker_loop, daemon=True).start()
     print(f"\n  FlowHMR web demo ready:  http://{ARGS.host}:{ARGS.port}\n")
+    # The page refreshes the job list every few seconds; drop those access-log
+    # lines so the console stays readable. Other requests still log normally.
+    class _QuietJobPolling(logging.Filter):
+        def filter(self, record):
+            return 'GET /api/jobs' not in record.getMessage()
+
+    logging.getLogger('werkzeug').addFilter(_QuietJobPolling())
     # Bind the backend first; failed binds must not launch an orphan MCP service.
     server = make_server(ARGS.host, ARGS.port, app, threaded=True)
 
