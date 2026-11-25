@@ -12,18 +12,44 @@ export function initHistory({ onOpen, onRerun, onDeleted, onUpdated }) {
   const more = $("historyMore");
   const deleteSelected = $("historyDeleteSelected"), deleteAll = $("historyDeleteAll");
   const selected = new Set(), rows = new Map();
+  const tabMine = $("historyTabMine"), tabPool = $("historyTabPool");
+  let view = "mine";
   let current = null, busy = null, refreshVersion = 0, refreshing = false, pendingRefresh = false;
   let deletable = 0, through = null, nextCursor = null, loadingMore = false;
   let polling = true, timer = null;
 
   function updateActions() {
+    show("historyActions", view === "mine");
     $("historySelectedCount").textContent = selected.size;
     deleteSelected.disabled = busy !== null || selected.size === 0;
     deleteAll.disabled = busy !== null || deletable === 0;
-    show(more, !!nextCursor);
+    show(more, view === "mine" && !!nextCursor);
     more.disabled = loadingMore || busy !== null;
     setText(more, m(loadingMore ? "history.loading_more" : "history.more"));
   }
+
+  function setView(next) {
+    if (view === next) return;
+    view = next;
+    selected.clear();
+    for (const entry of rows.values()) entry.row.remove();
+    rows.clear();
+    through = nextCursor = null;
+    deletable = 0;
+    clearTimeout(timer);
+    tabMine.classList.toggle("active", view === "mine");
+    tabPool.classList.toggle("active", view === "pool");
+    setAttr(tabMine, "aria-selected", view === "mine");
+    setAttr(tabPool, "aria-selected", view === "pool");
+    setError("");
+    setText($("historySummary"), "");
+    show("historyEmpty", false);
+    updateActions();
+    void refresh();
+  }
+
+  tabMine.addEventListener("click", () => setView("mine"));
+  tabPool.addEventListener("click", () => setView("pool"));
 
   function setError(msg) {
     setText($("historyError"), msg);
@@ -109,6 +135,92 @@ export function initHistory({ onOpen, onRerun, onDeleted, onUpdated }) {
     action.classList.toggle("spin", busy === job.id);
   }
 
+  function wireAction(entry, id) {
+    entry.action.addEventListener("click", async () => {
+      if (busy !== null) return;
+      const stopping = entry.active;
+      busy = stopping ? `stop:${id}` : id;
+      setError("");
+      void refresh();
+      try { await (stopping ? api.cancelJob(id) : onRerun(id)); }
+      catch (err) { setError(err.message ? err : m(stopping ? "job.stop_failed" : "job.rerun_failed")); }
+      finally { busy = null; void refresh(); }
+    });
+  }
+
+  function createPoolRow(job) {
+    const row = el("div", "run"), open = el("button", "run-open");
+    const thumb = el("span", "run-thumb"), image = el("img"), info = el("div", "run-info");
+    const name = el("div", "run-name", job.filename), sub = el("div", "run-sub");
+    const tag = el("span", "badge"), action = el("button", "icon-btn");
+    const { id } = job;
+    const entry = { row, check: null, open, image, name, sub, tag, action, pool: true,
+                    mine: !!job.mine, status: null, active: null, person: undefined, failedThumb: false };
+    row.dataset.job = id;
+    open.type = action.type = "button";
+    open.addEventListener("click", () => { if (entry.mine) onOpen(id); });
+    image.alt = "";
+    image.loading = "lazy";
+    image.decoding = "async";
+    image.addEventListener("load", () => { entry.failedThumb = false; thumb.classList.add("ready"); });
+    image.addEventListener("error", () => { entry.failedThumb = true; thumb.classList.remove("ready"); });
+    wireAction(entry, id);
+    info.append(name, sub);
+    thumb.append(image);
+    open.append(thumb, info, tag);
+    row.append(open, action);
+    rows.set(id, entry);
+    return entry;
+  }
+
+  function updatePoolRow(entry, job, now) {
+    const { row, open, image, name, sub, tag, action } = entry;
+    const active = ACTIVE.has(job.status);
+    const person = job.person_thumbs?.[0] ?? null;
+    if (entry.person !== person) {
+      entry.person = person;
+      image.src = api.poolThumbnailUrl(job.id, person);
+    }
+    entry.mine = !!job.mine;
+    setText(name, job.filename);
+    setAttr(open, "title", entry.mine ? job.filename : `${job.filename} — ${m("pool.readonly")}`);
+    open.disabled = !entry.mine;
+    row.classList.toggle("current", job.id === current);
+    const bits = [job.owner_name || job.owner_id, formatRelative(job.created, now)];
+    if (job.queue_position) bits.push(t("pool.queue_position", { count: job.queue_position }));
+    if (job.rating?.score) bits.push(`★ ${job.rating.score}`);
+    const summary = bits.filter(Boolean).join(" · ");
+    setText(sub, summary);
+    setAttr(sub, "title", summary);
+    tag.className = `badge ${job.status}`;
+    setText(tag, job.status === "running" ? `${job.progress}%` : () => statusLabel(job.status));
+    if (entry.active !== active) action.innerHTML = active ? STOP : RERUN;
+    entry.status = job.status;
+    entry.active = active;
+    show(action, entry.mine);
+    action.disabled = busy !== null || job.status === "cancel_requested";
+    const actionLabel = m(active ? (job.status === "cancel_requested" ? "job.cancel_requested" : "history.stop") : "progress.rerun");
+    setAttr(action, "title", actionLabel);
+    setAttr(action, "aria-label", () => `${localize(actionLabel)}: ${job.filename}`);
+  }
+
+  function applyPool(data) {
+    const { jobs, now } = data;
+    const visible = new Set(jobs.map((job) => job.id));
+    for (const [id, entry] of rows) {
+      if (!visible.has(id)) { entry.row.remove(); rows.delete(id); }
+    }
+    setText($("historySummary"), jobs.length ? `· ${jobs.length}` : "");
+    show("historyEmpty", jobs.length === 0);
+    jobs.forEach((job, i) => {
+      const entry = rows.get(job.id) ?? createPoolRow(job);
+      updatePoolRow(entry, job, now);
+      if (list.children[i] !== entry.row) list.insertBefore(entry.row, list.children[i] ?? null);
+    });
+    updateActions();
+    return jobs;
+  }
+
   function applyWindow(data) {
     const { jobs, now } = data;
     nextCursor = data.next_cursor;
@@ -137,6 +249,12 @@ export function initHistory({ onOpen, onRerun, onDeleted, onUpdated }) {
     refreshing = true;
     const version = ++refreshVersion;
     try {
+      if (view === "pool") {
+        const data = await api.getPool();
+        if (version !== refreshVersion) return;
+        applyPool(data);
+        return;
+      }
       const data = await api.getJobs({ through });
       if (version !== refreshVersion) return data.jobs;
       const jobs = applyWindow(data);
@@ -151,7 +269,7 @@ export function initHistory({ onOpen, onRerun, onDeleted, onUpdated }) {
   }
 
   async function loadMore() {
-    if (!nextCursor || loadingMore || busy !== null) return;
+    if (view !== "mine" || !nextCursor || loadingMore || busy !== null) return;
     setError("");
     loadingMore = true;
     clearTimeout(timer);

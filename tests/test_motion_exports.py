@@ -38,6 +38,8 @@ class MotionExportsTest(unittest.TestCase):
         self.root = Path(self.temp)
         stack.enter_context(patch.object(server, "ARGS", SimpleNamespace(work_dir=self.temp)))
         stack.enter_context(patch.object(server, "MEMBER_DIRS", {}))
+        # These contracts exercise export handling, not the job ownership guard.
+        stack.enter_context(patch.object(server, "can_access_owner", return_value=True))
         single = self.root / "single"
         scene = self.root / "group" / "scene"
         single.mkdir()
@@ -52,8 +54,9 @@ class MotionExportsTest(unittest.TestCase):
                  poses_2=poses, trans_2=trans + [1.25, 0, 0], betas_2=betas, mocap_framerate=30)
         people = [{"person": 1, "start": 0, "end": 2}, {"person": 2, "start": 7, "end": 9}]
         stack.enter_context(patch.object(server, "JOBS", {
-            "single": {"status": "done", "filename": "sample.mp4"},
-            "group": {"status": "done", "filename": "duet.mp4", "person_batch": "group", "scene": {"people": people}},
+            "single": {"status": "done", "filename": "sample.mp4", "rating": {"score": 5}},
+            "group": {"status": "done", "filename": "duet.mp4", "person_batch": "group", "rating": {"score": 5},
+                      "scene": {"people": people}},
         }))
         self.client = stack.enter_context(server.app.test_client())
 

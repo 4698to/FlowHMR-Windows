@@ -19,7 +19,6 @@ import logging
 import math
 import mimetypes
 import os
-import queue
 import re
 import shutil
 import sys
@@ -37,7 +36,7 @@ from urllib.parse import urlsplit
 from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile
 
 import numpy as np
-from flask import Flask, Response, abort, jsonify, request, send_file, send_from_directory
+from flask import Flask, Response, abort, g, jsonify, request, send_file, send_from_directory
 from werkzeug.serving import make_server
 
 WEB_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -114,14 +113,20 @@ def notify_ui_changes(response):
 
 @app.get('/api/ui/events')
 def api_ui_events():
-    if not local_model_request() or request.headers.get('Sec-Fetch-Site') == 'cross-site':
+    if request.headers.get('Sec-Fetch-Site') == 'cross-site':
         abort(403)
+    viewer, local = request_identity(), local_model_request()
     try:
         cursor = int(request.headers.get('Last-Event-ID', UI_EVENTS.sequence))
         if cursor < 0:
             raise ValueError()
     except ValueError:
         abort(400)
+
+    def visible(event):
+        # Pool updates are shared; private feeds stay on the machine with the service.
+        return local or admin_session_valid() or event['kind'] in ('jobs', 'pool', 'rating') or (
+            event['data'].get('owner_id') == viewer)
 
     def stream():
         nonlocal cursor
@@ -132,7 +137,8 @@ def api_ui_events():
                 yield ': heartbeat\n\n'
             for event in events:
                 cursor = event['id']
-                yield f"id: {cursor}\nevent: update\ndata: {json.dumps(event)}\n\n"
+                if visible(event):
+                    yield f"id: {cursor}\nevent: update\ndata: {json.dumps(event)}\n\n"
     return Response(stream(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
@@ -264,12 +270,51 @@ MEMBER_DIRS = {}
 JOBS_LOCK = threading.Lock()
 FBX_EXPORT_LOCK = threading.Lock()
 BODY_PREVIEW_LOCK = threading.Lock()
-JOB_QUEUE = queue.Queue()
 _POSTPROCESS = None
 SELECTIONS = {}           # job_id -> {"event": Event, "people": list[int] | None}
 CANCEL_REQUESTS = set()
 SELECT_TIMEOUT_S = 600    # MCP jobs have a bounded wait for a person selection.
 ACTIVE_STATUSES = {"queued", "running", "waiting_user", "cancel_requested", "uploading"}
+
+# User identity (device cookie) and job ownership. See docs/user-isolation-plan.md.
+USER_COOKIE = "flowhmr_uid"
+MCP_OWNER = "mcp"
+LEGACY_OWNER = "legacy"
+USER_UID_PATTERN = re.compile(r"[a-f0-9]{32}")
+JOB_PATH_PATTERN = re.compile(r"/api/jobs/([^/]+)(?:/.*)?")
+USERS = {}                # uid -> nickname, first/last seen, IP history (users.json)
+USERS_LOCK = threading.Lock()
+USERS_SAVED_AT = 0.0      # throttles users.json writes during job polling
+QUEUE_SEQ = 0
+QUEUE_SEQ_LOCK = threading.Lock()
+QUEUE_LIMIT_OWNER = 20
+QUEUE_LIMIT_TOTAL = 200
+RATING_TAGS = ("quality", "hands", "physics", "camera", "clothing", "other")
+RATINGS_LOCK = threading.Lock()
+
+# Admin console (docs/user-isolation-plan.md §7). Off unless a key is supplied.
+ADMIN_COOKIE = "flowhmr_admin"
+ADMIN_HEADER = "X-FlowHMR-Admin"
+ADMIN_KEY = os.environ.get("FLOWHMR_ADMIN_KEY", "").strip()
+ADMIN_SESSION_TTL = 12 * 60 * 60
+ADMIN_LOCK = threading.Lock()
+ADMIN_LOGIN_FAILURES = {}  # ip -> {"fails": [ts], "consecutive": n, "locked_until": ts}
+ADMIN_AUDIT_LOCK = threading.Lock()
+ADMIN_DELETE_PENDING = set()  # running jobs whose folders are removed after the safe stop
+ADMIN_SETTINGS = {}
+ADMIN_SETTINGS_LOCK = threading.Lock()
+ADMIN_SETTINGS_SAVED_AT = 0.0
+ADMIN_SETTINGS_DEFAULTS = {
+    "queue_limit_owner": 20, "queue_limit_total": 200, "fair_schedule": True,
+    "pool_show_full": True, "rating_threshold": 4, "require_rating": True, "history_days": 30,
+}
+
+
+def _next_queue_seq():
+    global QUEUE_SEQ
+    with QUEUE_SEQ_LOCK:
+        QUEUE_SEQ += 1
+        return QUEUE_SEQ
 
 
 class JobCancelled(Exception):
@@ -660,6 +705,15 @@ def restore_jobs():
                             0.0, interrupted_at - paused_at,
                         )
                     stage.update(status="cancelled" if cancelled else "failed", end=interrupted_at)
+        job.setdefault("owner_id", LEGACY_OWNER)
+        job.setdefault("owner_name", None)
+        job.setdefault("client_ip", None)
+        job.setdefault("queued_at", job.get("created"))
+        job.setdefault("queue_seq", 0)
+        job.setdefault("priority", 0)
+        job.setdefault("rating", None)
+        job.setdefault("rating_history", [])
+        job.setdefault("allow_library", True)
         saved_params = job.get("params", {})
         from flowhmr.multishot.tasks import restore_camera_state
         restore_camera_state(job, entry.path)
@@ -694,6 +748,9 @@ def restore_jobs():
         with JOBS_LOCK:
             JOBS[job["id"]] = job
             _persist_job_locked(job)
+    global QUEUE_SEQ
+    with QUEUE_SEQ_LOCK:
+        QUEUE_SEQ = max(QUEUE_SEQ, max((int(j.get("queue_seq") or 0) for j in JOBS.values()), default=0))
 
 
 def _build_job(filename, params, ext):
@@ -702,6 +759,9 @@ def _build_job(filename, params, ext):
         "id": job_id, "filename": filename, "params": params, "ext": ext, "recovered": False,
         "status": "queued", "message": "Waiting in queue", "error": None, "progress": 0,
         "source": "desktop", "selection_policy": "explicit",
+        "owner_id": LEGACY_OWNER, "owner_name": None, "client_ip": None,
+        "queue_seq": _next_queue_seq(), "priority": 0,
+        "rating": None, "rating_history": [], "allow_library": True,
         "created": time.time(), "started": None, "finished": None,
         "num_frames": None, "fps": 30, "has_fbx": False,
         "candidates": None, "default_person": None, "selected_person": None, "selection_auto": False,
@@ -712,6 +772,7 @@ def _build_job(filename, params, ext):
         job["stages"][STAGE_INDEX["camera"]].update(
             label="Static camera", detail="Camera estimation skipped; fixed camera pose",
         )
+    job["queued_at"] = job["created"]
     return job
 
 
@@ -735,9 +796,158 @@ def input_video(job_id):
     return os.path.join(job_dir(job_id), f"input{JOBS[job_id]['ext']}")
 
 
+def _payload_job(payload):
+    return payload[1] if isinstance(payload, tuple) else payload
+
+
+class JobQueue:
+    """Single-worker queue ordered by priority, then one task per owner (round robin)."""
+
+    def __init__(self):
+        self.cond = threading.Condition()
+        self.items = []
+        self.running = None
+        self.paused = False
+
+    @staticmethod
+    def _select(items):
+        if not admin_setting("fair_schedule"):
+            return min(range(len(items)), key=lambda index: (-items[index]["priority"], items[index]["seq"]))
+        priority = max(item["priority"] for item in items)
+        best, seen = None, set()
+        for index, item in enumerate(items):
+            if item["priority"] != priority or item["owner"] in seen:
+                continue
+            seen.add(item["owner"])
+            if best is None or item["seq"] < items[best]["seq"]:
+                best = index
+        return best
+
+    def _order(self):
+        remaining, ordered = list(self.items), []
+        while remaining:
+            ordered.append(remaining.pop(self._select(remaining)))
+        return ordered
+
+    def put(self, payload, owner_id, priority=0):
+        with self.cond:
+            self.items.append({"seq": _next_queue_seq(), "priority": int(priority or 0),
+                               "owner": owner_id, "payload": payload})
+            self.cond.notify_all()
+
+    def get(self):
+        with self.cond:
+            while not self.items or self.paused:
+                self.cond.wait()
+            item = self.items.pop(self._select(self.items))
+            self.running = item["payload"]
+            return item["payload"]
+
+    def task_done(self):
+        with self.cond:
+            self.running = None
+
+    def remove(self, job_id):
+        with self.cond:
+            kept = [item for item in self.items if _payload_job(item["payload"]) != job_id]
+            removed = len(self.items) - len(kept)
+            self.items = kept
+            if removed:
+                self.cond.notify_all()
+            return removed
+
+    def position(self, job_id):
+        with self.cond:
+            for index, item in enumerate(self._order()):
+                if _payload_job(item["payload"]) == job_id:
+                    return index + 1
+        return None
+
+    def snapshot(self):
+        with self.cond:
+            order = self._order()
+            by_owner = defaultdict(int)
+            for item in self.items:
+                by_owner[item["owner"]] += 1
+            return {"running": _payload_job(self.running) if self.running is not None else None,
+                    "queued": len(self.items), "by_owner": dict(by_owner), "paused": self.paused,
+                    "positions": {_payload_job(item["payload"]): index + 1 for index, item in enumerate(order)}}
+
+    def counts(self):
+        with self.cond:
+            by_owner = defaultdict(int)
+            for item in self.items:
+                by_owner[item["owner"]] += 1
+            return len(self.items), dict(by_owner)
+
+    def set_paused(self, paused):
+        with self.cond:
+            self.paused = bool(paused)
+            self.cond.notify_all()
+            return self.paused
+
+    def pending(self):
+        """Ordered queue entries, used by the admin console and queue controls."""
+        with self.cond:
+            return [{"job_id": _payload_job(item["payload"]), "owner": item["owner"],
+                     "priority": item["priority"], "seq": item["seq"]}
+                    for item in self._order()]
+
+    def set_priority(self, job_id, priority):
+        with self.cond:
+            changed = 0
+            for item in self.items:
+                if _payload_job(item["payload"]) == job_id:
+                    item["priority"] = int(priority)
+                    changed += 1
+            if changed:
+                self.cond.notify_all()
+            return changed
+
+    def priority_bounds(self):
+        with self.cond:
+            values = [item["priority"] for item in self.items]
+            return (max(values), min(values)) if values else (0, 0)
+
+    def clear(self):
+        with self.cond:
+            removed = [_payload_job(item["payload"]) for item in self.items]
+            self.items = []
+            if removed:
+                self.cond.notify_all()
+            return removed
+
+    def running_job(self):
+        with self.cond:
+            return _payload_job(self.running) if self.running is not None else None
+
+
+JOB_QUEUE = JobQueue()
+
+
+def queue_limit_error(owner_id):
+    total, by_owner = JOB_QUEUE.counts()
+    limit_total = int(admin_setting("queue_limit_total", QUEUE_LIMIT_TOTAL))
+    limit_owner = int(admin_setting("queue_limit_owner", QUEUE_LIMIT_OWNER))
+    if total >= limit_total:
+        return api_error("queue_full", "任务队列已满，请稍后再提交。", 429, limit=limit_total)
+    if by_owner.get(owner_id, 0) >= limit_owner:
+        return api_error("queue_owner_full", "你的待处理任务过多，请等待后再提交。", 429, limit=limit_owner)
+    return None
+
+
 def enqueue(job):
-    JOB_QUEUE.put(job["id"])
-    UI_EVENTS.publish('jobs', {'job_id': job.get('person_batch') or job['id']})
+    JOB_QUEUE.put(job["id"], job_owner(job), job.get("priority") or 0)
+    UI_EVENTS.publish('jobs', {'job_id': job.get('person_batch') or job['id'],
+                               'owner_id': job_owner(job)})
+
+
+def _enqueue_payload(payload):
+    job_id = _payload_job(payload)
+    with JOBS_LOCK:
+        job = JOBS.get(job_id) or {}
+        owner, priority = job_owner(job), job.get("priority") or 0
+    JOB_QUEUE.put(payload, owner, priority)
 
 
 def worker_loop():
@@ -757,6 +967,7 @@ def worker_loop():
                     except Exception:
                         traceback.print_exc()
                 JOB_QUEUE.task_done()
+                finalize_admin_deletions(job_id[1])
             continue
         try:
             run_job(job_id)
@@ -820,6 +1031,7 @@ def worker_loop():
                 traceback.print_exc()
             finally:
                 JOB_QUEUE.task_done()
+                finalize_admin_deletions(job_id)
 
 
 def _raise_if_cancelled(job_id):
@@ -889,6 +1101,8 @@ def _confirm_people(job_id, result, candidates, people, *, automatic):
             child.update(_selected_track(candidate), person_batch=job_id,
                          source=parent.get('source', 'desktop'),
                          selection_policy=parent.get('selection_policy', 'explicit'),
+                         owner_id=job_owner(parent), owner_name=parent.get('owner_name'),
+                         client_ip=parent.get('client_ip'),
                          video_size=[result.width, result.height], source_frames=result.total_frames,
                          body_reference=reference)
             child_stage = os.path.join(staging, child["id"])
@@ -1655,6 +1869,446 @@ def get_job(job_id):
         return copy.deepcopy(job)
 
 
+# --------------------------------------------------------------------------- identity
+def users_path():
+    work_dir = getattr(ARGS, "work_dir", None)
+    return os.path.join(work_dir, "users.json") if work_dir else None
+
+
+def default_user_name(uid):
+    return f"用户-{uid[:4].upper()}"
+
+
+def client_ip():
+    ip = request.remote_addr or ""
+    if getattr(ARGS, "trust_proxy", False):
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            ip = forwarded.split(",")[-1].strip() or ip
+    return ip[7:] if ip.startswith("::ffff:") else ip
+
+
+def _normalize_user(uid, saved):
+    name = saved.get("name")
+    if not isinstance(name, str) or not name.strip():
+        name = default_user_name(uid)
+    history = [entry for entry in saved.get("ip_history") or []
+               if isinstance(entry, dict) and entry.get("ip")]
+    return {"uid": uid, "name": name.strip()[:24],
+            "created": float(saved.get("created") or time.time()),
+            "last_seen": float(saved.get("last_seen") or 0.0),
+            "first_ip": str(saved.get("first_ip") or ""),
+            "last_ip": str(saved.get("last_ip") or ""),
+            "ip_history": history[-10:],
+            "last_agent": str(saved.get("last_agent") or ""),
+            "disabled": bool(saved.get("disabled", False))}
+
+
+def load_users():
+    global USERS_SAVED_AT
+    path = users_path()
+    if path is None:
+        return
+    try:
+        with open(path, encoding="utf-8") as stream:
+            saved = json.load(stream)
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError):
+        app.logger.warning("Could not read %s", path, exc_info=True)
+        return
+    if not isinstance(saved, dict):
+        return
+    with USERS_LOCK:
+        for uid, record in saved.items():
+            if isinstance(uid, str) and USER_UID_PATTERN.fullmatch(uid) and isinstance(record, dict):
+                USERS[uid] = _normalize_user(uid, record)
+        USERS_SAVED_AT = time.time()
+
+
+def save_users_locked():
+    global USERS_SAVED_AT
+    path = users_path()
+    if path is None:
+        USERS_SAVED_AT = time.time()
+        return
+    temp = path + ".tmp"
+    try:
+        with open(temp, "w", encoding="utf-8") as stream:
+            json.dump(USERS, stream, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    except OSError:
+        app.logger.warning("Could not write %s", path, exc_info=True)
+    USERS_SAVED_AT = time.time()
+
+
+def user_name(uid):
+    with USERS_LOCK:
+        return (USERS.get(uid) or {}).get("name") or default_user_name(uid)
+
+
+def owner_display_name(owner_id):
+    return "MCP" if owner_id == MCP_OWNER else user_name(owner_id)
+
+
+# --------------------------------------------------------------------------- admin
+def admin_settings_path():
+    work_dir = getattr(ARGS, "work_dir", None)
+    return os.path.join(work_dir, "admin_settings.json") if work_dir else None
+
+
+def load_admin_settings():
+    global ADMIN_SETTINGS_SAVED_AT
+    with ADMIN_SETTINGS_LOCK:
+        ADMIN_SETTINGS.clear()
+        ADMIN_SETTINGS.update(copy.deepcopy(ADMIN_SETTINGS_DEFAULTS))
+        path = admin_settings_path()
+        if path is None:
+            return
+        try:
+            with open(path, encoding="utf-8") as stream:
+                saved = json.load(stream)
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError):
+            app.logger.warning("Could not read %s", path, exc_info=True)
+            return
+        if isinstance(saved, dict):
+            for key, default in ADMIN_SETTINGS_DEFAULTS.items():
+                if key in saved and type(saved[key]) is type(default):
+                    ADMIN_SETTINGS[key] = saved[key]
+        ADMIN_SETTINGS_SAVED_AT = time.time()
+
+
+def save_admin_settings_locked():
+    global ADMIN_SETTINGS_SAVED_AT
+    path = admin_settings_path()
+    if path is None:
+        ADMIN_SETTINGS_SAVED_AT = time.time()
+        return
+    temp = path + ".tmp"
+    try:
+        with open(temp, "w", encoding="utf-8") as stream:
+            json.dump(ADMIN_SETTINGS, stream, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    except OSError:
+        app.logger.warning("Could not write %s", path, exc_info=True)
+    ADMIN_SETTINGS_SAVED_AT = time.time()
+
+
+def admin_setting(key, default=None):
+    with ADMIN_SETTINGS_LOCK:
+        if ADMIN_SETTINGS:
+            return ADMIN_SETTINGS.get(key, ADMIN_SETTINGS_DEFAULTS.get(key, default))
+    return ADMIN_SETTINGS_DEFAULTS.get(key, default)
+
+
+def admin_configured():
+    return bool(ADMIN_KEY)
+
+
+def _admin_signature(issued):
+    return hmac.new(ADMIN_KEY.encode("utf-8"), f"flowhmr-admin:{issued}".encode("utf-8"),
+                    hashlib.sha256).hexdigest()
+
+
+def issue_admin_token():
+    issued = int(time.time())
+    return f"{issued}.{_admin_signature(issued)}"
+
+
+def admin_session_valid():
+    cached = getattr(g, "admin_ok", None)
+    if cached is not None:
+        return cached
+    ok = False
+    if ADMIN_KEY:
+        token = request.cookies.get(ADMIN_COOKIE, "")
+        issued, _, signature = token.partition(".")
+        if issued.isdigit() and 0 <= time.time() - int(issued) <= ADMIN_SESSION_TTL:
+            ok = hmac.compare_digest(signature, _admin_signature(issued))
+    g.admin_ok = ok
+    if ok:
+        g.admin_refresh_cookie = True  # 12-hour sliding session
+    return ok
+
+
+def admin_guard(write=False):
+    if not ADMIN_KEY:
+        abort(404)
+    if not admin_session_valid():
+        return api_error("admin_auth_required", "需要管理员登录。", 401)
+    if write and request.headers.get(ADMIN_HEADER) != "1":
+        return api_error("admin_header_required", "缺少管理员请求头。", 403)
+    return None
+
+
+def admin_login_limited(ip):
+    now = time.time()
+    with ADMIN_LOCK:
+        record = ADMIN_LOGIN_FAILURES.get(ip)
+        if record is None:
+            return 0.0
+        if record["locked_until"] > now:
+            return record["locked_until"] - now
+        record["fails"] = [stamp for stamp in record["fails"] if now - stamp < 60]
+        if len(record["fails"]) >= 5:
+            return max(1.0, 60 - (now - record["fails"][0]))
+    return 0.0
+
+
+def admin_login_failed(ip):
+    now = time.time()
+    with ADMIN_LOCK:
+        record = ADMIN_LOGIN_FAILURES.setdefault(
+            ip, {"fails": [], "consecutive": 0, "locked_until": 0.0})
+        record["fails"] = [stamp for stamp in record["fails"] if now - stamp < 60] + [now]
+        record["consecutive"] += 1
+        if record["consecutive"] >= 10:
+            record["locked_until"] = now + 300
+            record["consecutive"] = 0
+
+
+def admin_login_succeeded(ip):
+    with ADMIN_LOCK:
+        ADMIN_LOGIN_FAILURES.pop(ip, None)
+
+
+def audit_path():
+    work_dir = getattr(ARGS, "work_dir", None)
+    return os.path.join(work_dir, "admin_audit.jsonl") if work_dir else None
+
+
+def audit_admin(action, target=None, result="ok", detail=None):
+    """Append one admin write operation (including failures) to admin_audit.jsonl."""
+    payload = {"ts": time.time(), "actor": "admin", "target": target, "action": action,
+               "result": result, "ip": client_ip()}
+    if detail:
+        payload["detail"] = str(detail)[:500]
+    path = audit_path()
+    if path is None:
+        return
+    try:
+        with ADMIN_AUDIT_LOCK:
+            try:
+                if os.path.getsize(path) >= 10 * 1024 * 1024:
+                    for index in range(4, 0, -1):
+                        if os.path.isfile(f"{path}.{index}"):
+                            os.replace(f"{path}.{index}", f"{path}.{index + 1}")
+                    os.replace(path, f"{path}.1")
+            except OSError:
+                pass
+            with open(path, "a", encoding="utf-8") as stream:
+                stream.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except OSError:
+        app.logger.warning("Could not append %s", path, exc_info=True)
+
+
+def user_disabled(uid):
+    with USERS_LOCK:
+        return bool((USERS.get(uid) or {}).get("disabled"))
+
+
+def dir_size(path):
+    total = 0
+    for root, _, names in os.walk(path):
+        for name in names:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                continue
+    return total
+
+
+def ratings_path():
+    work_dir = getattr(ARGS, "work_dir", None)
+    return os.path.join(work_dir, "ratings.jsonl") if work_dir else None
+
+
+def append_rating_event(payload):
+    path = ratings_path()
+    if path is None:
+        return
+    try:
+        with RATINGS_LOCK, open(path, "a", encoding="utf-8") as stream:
+            stream.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except OSError:
+        app.logger.warning("Could not append %s", path, exc_info=True)
+
+
+def rating_gate(job):
+    """Downloads require a rating; MCP and admin are exempt."""
+    if job_owner(job) == MCP_OWNER or admin_session_valid():
+        return None
+    if not admin_setting("require_rating", True):
+        return None
+    rating = job.get("rating")
+    if isinstance(rating, dict) and rating.get("score"):
+        return None
+    return api_error("rating_required", "请先评分后再下载产物。", 409)
+
+
+def visible_rating(job, mine):
+    rating = job.get("rating")
+    if not isinstance(rating, dict):
+        return None
+    keys = ("score", "tags", "comment", "created_at", "updated_at") if mine else ("score", "tags", "updated_at")
+    return {key: copy.deepcopy(rating.get(key)) for key in keys}
+
+
+def touch_user(uid, ip):
+    now = time.time()
+    agent = (request.user_agent.string or "")[:200]
+    created = False
+    with USERS_LOCK:
+        record = USERS.get(uid)
+        if record is None:
+            record = USERS[uid] = _normalize_user(uid, {"created": now, "last_seen": now})
+            created = True
+        record["last_seen"] = now
+        record["last_agent"] = agent
+        if ip:
+            record["last_ip"] = ip
+            if not record["first_ip"]:
+                record["first_ip"] = ip
+            entry = next((item for item in record["ip_history"] if item.get("ip") == ip), None)
+            if entry is None:
+                entry = {"ip": ip, "first_seen": now, "last_seen": now, "hits": 0}
+            else:
+                entry = dict(entry)
+            entry["last_seen"] = now
+            entry["hits"] = int(entry.get("hits") or 0) + 1
+            record["ip_history"] = [entry, *[item for item in record["ip_history"]
+                                             if item.get("ip") != ip]][:10]
+        if created or now - USERS_SAVED_AT >= 15:
+            save_users_locked()
+
+
+def ip_fallback_user(ip):
+    """Reuse the last uid seen from this IP so a cleared cookie keeps the same machine identity."""
+    if not ip:
+        return None
+    agent = (request.user_agent.string or "")[:200]
+    best = None
+    with USERS_LOCK:
+        for uid, record in USERS.items():
+            if record.get("disabled") or record.get("last_ip") != ip:
+                continue
+            score = (record.get("last_agent") == agent, record.get("last_seen") or 0.0)
+            if best is None or score > best[0]:
+                best = (score, uid)
+    return best[1] if best else None
+
+
+def current_user_id():
+    uid = getattr(g, "user_id", None)
+    if uid:
+        return uid
+    cookie = request.cookies.get(USER_COOKIE, "")
+    if USER_UID_PATTERN.fullmatch(cookie):
+        uid = cookie
+    else:
+        uid = ip_fallback_user(client_ip()) or uuid.uuid4().hex
+        g.issue_user_cookie = True
+    g.user_id = uid
+    touch_user(uid, client_ip())
+    return uid
+
+
+def request_identity():
+    """Owner key of the current request: a user uid, or ``mcp`` for the MCP service."""
+    identity = getattr(g, "identity", None)
+    if identity:
+        return identity
+    key = request.headers.get(SERVICE_KEY_HEADER, "")
+    if (key and key.isascii() and local_model_request()
+            and hmac.compare_digest(key, MCP_SERVICE.service_key)):
+        identity = MCP_OWNER
+    else:
+        identity = current_user_id()
+    g.identity = identity
+    return identity
+
+
+def job_owner(job):
+    owner = job.get("owner_id")
+    return owner if isinstance(owner, str) and owner else LEGACY_OWNER
+
+
+def local_browser_request():
+    """Loopback browsers (the desktop shell) share the machine with the MCP service."""
+    cached = getattr(g, "local_browser", None)
+    if cached is None:
+        cached = g.local_browser = local_model_request()
+    return cached
+
+
+def accessible_owners():
+    """Owner keys this request may see: its own, plus shared ones for the desktop shell."""
+    owners = {request_identity()}
+    if local_browser_request():
+        owners.update((MCP_OWNER, LEGACY_OWNER))
+    return owners
+
+
+def can_access_owner(owner):
+    """Owners may reach their own jobs; admins reach every job; the desktop shell also gets shared ones."""
+    if admin_session_valid():
+        return True
+    return owner in accessible_owners()
+
+
+def require_job_access(job):
+    if not can_access_owner(job_owner(job)):
+        abort(404)
+
+
+@app.before_request
+def guard_job_ownership():
+    match = JOB_PATH_PATTERN.fullmatch(request.path)
+    if match is None:
+        return None
+    with JOBS_LOCK:
+        job = JOBS.get(match.group(1))
+        owner = job_owner(job) if job is not None else None
+    if owner is not None and not can_access_owner(owner):
+        abort(404)
+    return None
+
+
+@app.after_request
+def attach_user_cookie(response):
+    if getattr(g, "issue_user_cookie", False):
+        response.set_cookie(USER_COOKIE, g.user_id, max_age=365 * 24 * 60 * 60,
+                            httponly=True, samesite="Lax", path="/")
+    if getattr(g, "admin_refresh_cookie", False) and ADMIN_KEY:
+        response.set_cookie(ADMIN_COOKIE, issue_admin_token(), max_age=ADMIN_SESSION_TTL,
+                            httponly=True, samesite="Strict", path="/")
+    return response
+
+
+@app.route("/api/me", methods=["GET", "PUT"])
+def api_me():
+    uid = current_user_id()
+    if request.method == "PUT":
+        body = request.get_json(silent=True)
+        name = body.get("name") if isinstance(body, dict) else None
+        if not isinstance(name, str):
+            return api_error("user_name_invalid", "昵称无效。", 400)
+        name = " ".join(name.split())[:24]
+        if not name:
+            return api_error("user_name_invalid", "昵称不能为空。", 400)
+        with USERS_LOCK:
+            USERS.setdefault(uid, _normalize_user(uid, {}))
+            USERS[uid]["name"] = name
+            save_users_locked()
+    return jsonify(uid=uid, name=user_name(uid), ip=client_ip(), local=local_model_request())
+
+
 @app.route("/")
 def index():
     return send_from_directory(WEB_DIR, "index.html")
@@ -1693,7 +2347,7 @@ def api_mcp_parameters():
                    parameter_application='Import uses defaults; rerun inherits omitted parameters and creates a new job.')
 
 
-def submission_metadata(values, params):
+def submission_metadata(values, params, owner=None):
     source, policy = 'desktop', 'explicit'
     if values.get('source') == 'mcp':
         require_mcp_service(max_bytes=None)
@@ -1701,7 +2355,16 @@ def submission_metadata(values, params):
         if policy not in ('explicit', 'automatic'):
             raise UserMessage('Invalid selection policy.', 'param_selection_policy')
     params['manual_select'] = policy == 'explicit'
-    return {'source': source, 'selection_policy': policy}
+    if owner is None:
+        owner_id = MCP_OWNER if source == 'mcp' else current_user_id()
+        owner_name = owner_display_name(owner_id)
+    else:
+        owner_id, owner_name = owner
+        owner_name = owner_name or owner_display_name(owner_id)
+    if owner_id not in (MCP_OWNER, LEGACY_OWNER) and user_disabled(owner_id) and not admin_session_valid():
+        raise UserMessage('账号已被管理员禁用，无法提交新任务。', 'user_disabled')
+    return {'source': source, 'selection_policy': policy,
+            'owner_id': owner_id, 'owner_name': owner_name, 'client_ip': client_ip()}
 
 
 @app.route('/api/mcp', methods=['GET', 'POST'])
@@ -1962,6 +2625,7 @@ def api_remove_character_library_entry(identifier):
 def api_set_actor_character(actor_id):
     check_character_library_request(128 << 10)
     job = get_job(actor_id)
+    require_job_access(job)
     if job["status"] != "done":
         abort(409)
     value = request.get_json(silent=True)
@@ -2284,7 +2948,10 @@ def api_upload():
         params = parse_params(request.form)
         metadata = submission_metadata(request.form, params)
     except UserMessage as e:
-        return api_error(e.code, str(e), 400, **e.params)
+        return api_error(e.code, str(e), 403 if e.code == "user_disabled" else 400, **e.params)
+    error = queue_limit_error(metadata["owner_id"])
+    if error is not None:
+        return error
     job = new_job(f.filename, params, ext, **metadata)
     f.save(input_video(job["id"]))
     enqueue(job)
@@ -2311,9 +2978,13 @@ def api_rerun(job_id):
         body = {**body, "reselect_person": True}
     try:
         params = parse_params(body, base=src["params"])
-        metadata = submission_metadata(body, params)
+        metadata = submission_metadata(body, params,
+                                       owner=(job_owner(src), src.get("owner_name")))
     except UserMessage as e:
-        return api_error(e.code, str(e), 400, **e.params)
+        return api_error(e.code, str(e), 403 if e.code == "user_disabled" else 400, **e.params)
+    error = queue_limit_error(metadata["owner_id"])
+    if error is not None:
+        return error
     src_sub = os.path.join(job_dir(job_id), SUB)
     bbox_name = f"{SUB}_bbox.npz"
     reselect = _to_bool(body.get("reselect_person"), False)
@@ -2389,10 +3060,17 @@ def api_cancel_job(job_id):
         if not active and job.get("scene_state") not in ("queued", "running"):
             return api_error("job_inactive", "任务已经结束。", 409)
         if len(members) > 1:
+            if job.get("scene_state") == "queued":
+                JOB_QUEUE.remove(job_id)
             job["scene_state"] = "cancel_requested" if job.get("scene_state") == "running" else "cancelled"
             _persist_job_locked(job)
         for member in active:
             mid = member["id"]
+            if member["status"] == "queued":
+                JOB_QUEUE.remove(mid)
+                member.update(status="cancelled", message="Stopped by user", finished=time.time())
+                _persist_job_locked(member)
+                continue
             CANCEL_REQUESTS.add(mid)
             member.update(status="cancel_requested", message="Stop requested; stopping at the next safe step")
             _persist_job_locked(member)
@@ -2453,6 +3131,66 @@ def api_select(job_id):
     return jsonify(ok=True, person=chosen[0], people=people)
 
 
+def parse_rating(body):
+    if not isinstance(body, dict):
+        raise UserMessage("评分数据无效。", "rating_invalid")
+    score = body.get("score")
+    tags = body.get("tags") or []
+    comment = body.get("comment") or ""
+    allow_library = body.get("allow_library", True)
+    if type(score) is not int or not 1 <= score <= 5:
+        raise UserMessage("评分需为 1–5 星。", "rating_score")
+    if (not isinstance(tags, list) or len(tags) > 3
+            or any(not isinstance(tag, str) or tag not in RATING_TAGS for tag in tags)):
+        raise UserMessage("评分标签无效。", "rating_tags")
+    if not isinstance(comment, str) or len(comment) > 200:
+        raise UserMessage("评语不能超过 200 字。", "rating_comment")
+    if type(allow_library) is not bool:
+        raise UserMessage("资源库选项无效。", "rating_library")
+    return score, list(dict.fromkeys(tags)), comment.strip(), allow_library
+
+
+@app.route("/api/jobs/<job_id>/rating", methods=["POST", "DELETE"])
+def api_rating(job_id):
+    body = request.get_json(silent=True) if request.method == "POST" else None
+    values = None
+    if request.method == "POST":
+        try:
+            values = parse_rating(body)
+        except UserMessage as error:
+            return api_error(error.code, str(error), 400)
+    now = time.time()
+    uid = request_identity()
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            abort(404)
+        if job["status"] != "done":
+            return api_error("rating_not_completed", "任务完成后才能评分。", 409)
+        history = list(job.get("rating_history") or [])
+        previous = job.get("rating") if isinstance(job.get("rating"), dict) else None
+        if values is None:
+            if previous is None:
+                return jsonify(ok=True, rating=None, allow_library=job.get("allow_library", True))
+            history.append({"score": None, "at": now, "uid": uid})
+            job.update(rating=None, rating_history=history[-10:])
+            event = {"job_id": job_id, "owner": job_owner(job), "score": None, "tags": [],
+                     "allow_library": False, "ts": now, "ip": client_ip()}
+        else:
+            score, tags, comment, allow_library = values
+            history.append({"score": score, "at": now, "uid": uid})
+            job.update(rating={"score": score, "tags": tags, "comment": comment, "uid": uid,
+                               "created_at": (previous or {}).get("created_at", now), "updated_at": now},
+                       rating_history=history[-10:], allow_library=allow_library)
+            event = {"job_id": job_id, "owner": job_owner(job), "score": score, "tags": tags,
+                     "allow_library": allow_library, "ts": now, "ip": client_ip()}
+        _persist_job_locked(job)
+        rating = copy.deepcopy(job.get("rating"))
+    append_rating_event(event)
+    UI_EVENTS.publish('jobs', {'job_id': job_id, 'owner_id': event["owner"]})
+    return jsonify(ok=True, rating=rating, allow_library=event["allow_library"])
+
+
 @app.route("/api/jobs/<job_id>/scene", methods=["POST"])
 @requires_runtime
 def api_prepare_scene(job_id):
@@ -2465,7 +3203,7 @@ def api_prepare_scene(job_id):
             return api_error("scene_active", "场景已存在或正在处理。", 409)
         parent.update(scene_state="queued", scene_message="等待对齐多人站位…", scene_error=None)
         _persist_job_locked(parent)
-        JOB_QUEUE.put(("scene", job_id))
+        JOB_QUEUE.put(("scene", job_id), job_owner(parent), parent.get("priority") or 0)
     return jsonify(ok=True)
 
 
@@ -2509,9 +3247,7 @@ def api_job(job_id):
                 pass
             finally:
                 capture.release()
-    with JOBS_LOCK:
-        job["queue_position"] = sum(1 for j in JOBS.values()
-                                    if j["status"] == "queued" and j["created"] < job["created"])
+    job["queue_position"] = JOB_QUEUE.position(job_id)
     job["now"] = time.time()
     job["models_loaded"] = ENGINE is not None
     return jsonify(job)
@@ -2552,15 +3288,19 @@ def api_jobs():
             "selected_person", "person_count", "person_done", "message", "loading_models", "scene_state", "source_frames", "stages",
             "sam_batch", "camera", "crossing_opt_used", "crossing_opt_reason",
             "camera_state", "camera_progress", "camera_finished",
-            "camera_available", "camera_revision")
+            "camera_available", "camera_revision",
+            "owner_id", "owner_name", "client_ip", "queued_at", "queue_seq", "priority",
+            "rating", "allow_library")
+    allowed = accessible_owners()
     with JOBS_LOCK:
+        visible = [row for row in JOBS.values() if job_owner(row) in allowed]
         groups = defaultdict(list)
-        for row in JOBS.values():
+        for row in visible:
             if row.get("person_batch"):
                 groups[row["person_batch"]].append(row)
         grouped = {mid for batch, members in groups.items() if batch in JOBS and len(members) > 1
                    for mid in (row["id"] for row in members if row["id"] != batch)}
-        ordered = sorted(JOBS.values(), key=history_key, reverse=True)
+        ordered = sorted(visible, key=history_key, reverse=True)
         ordered = [_scene_status_locked(j, groups[j["id"]]) if len(groups.get(j["id"], ())) > 1 else j
                    for j in ordered if j["id"] not in grouped]
         eligible = [row for row in ordered if before is None or history_key(row) < before]
@@ -2584,23 +3324,101 @@ def api_jobs():
                         "deletable_count": deletable_count})
 
 
-@app.route("/api/jobs", methods=["DELETE"])
-def api_delete_jobs():
-    """Delete selected jobs, or all finished jobs when no ids are supplied."""
-    body = request.get_json(silent=True) or {}
-    if not isinstance(body, dict):
-        return api_error("history_invalid_delete", "无效的历史删除请求。", 400)
-    requested = body.get("ids")
-    if requested is not None and (not isinstance(requested, list) or
-                                  any(not isinstance(job_id, str) for job_id in requested)):
-        return api_error("history_invalid_delete", "无效的历史删除请求。", 400)
+POOL_KEYS = ("id", "filename", "status", "progress", "created", "finished", "num_frames", "params", "recovered",
+             "source", "selection_policy", "selected_person", "person_count", "person_done", "message",
+             "loading_models", "scene_state", "source_frames", "stages", "camera_state", "camera_progress",
+             "camera_finished", "camera_available", "camera_revision", "client_ip", "queued_at", "queue_seq",
+             "priority", "allow_library", "person_batch")
 
-    deleted, skipped = [], []
+
+def pool_entry(job, allowed, positions, full=True):
+    owner = job_owner(job)
+    mine = owner in allowed
+    directory = job_dir(job["id"])
+    person_dir = os.path.join(directory, "persons")
+    try:
+        persons = sorted(name[:-4] for name in os.listdir(person_dir) if name.endswith(".jpg"))
+    except OSError:
+        persons = []
+    entry = {key: copy.deepcopy(job.get(key)) for key in POOL_KEYS}
+    if not full and not mine:
+        # Admin privacy switch: hide the owning user's details but keep pool progress visible.
+        for key in ("filename", "params", "client_ip"):
+            entry[key] = None
+    entry.update(owner_id=owner, owner_name=owner_display_name(owner), mine=mine,
+                 rating=visible_rating(job, mine), queue_position=positions.get(job["id"]),
+                 candidate_count=len(job.get("candidates") or []), person_thumbs=persons,
+                 has_thumbnail=bool(persons) or os.path.isfile(os.path.join(directory, "thumbnail.jpg")),
+                 can_download=mine and (owner in (MCP_OWNER, LEGACY_OWNER) or bool(job.get("rating"))))
+    return entry
+
+
+@app.get('/api/pool')
+def api_pool():
+    """All users' tasks, read-only, without artifact download links or runtime internals."""
+    allowed = accessible_owners()
     with JOBS_LOCK:
-        job_ids = list(JOBS) if requested is None else list(dict.fromkeys(requested))
+        rows = list(JOBS.values())
+        groups = defaultdict(list)
+        for row in rows:
+            if row.get("person_batch"):
+                groups[row["person_batch"]].append(row)
+        grouped = {mid for batch, members in groups.items() if batch in JOBS and len(members) > 1
+                   for mid in (row["id"] for row in members if row["id"] != batch)}
+        ordered = sorted(rows, key=history_key, reverse=True)
+        ordered = [_scene_status_locked(j, groups[j["id"]]) if len(groups.get(j["id"], ())) > 1 else j
+                   for j in ordered if j["id"] not in grouped]
+        snapshot = JOB_QUEUE.snapshot()
+        entries = [pool_entry(row, allowed, snapshot["positions"],
+                              full=bool(admin_setting("pool_show_full", True))) for row in ordered]
+    return jsonify(jobs=entries, now=time.time(), queued=snapshot["queued"],
+                   running=snapshot["running"], by_owner=snapshot["by_owner"])
+
+
+@app.get('/api/pool/<job_id>/thumbnail.jpg')
+def api_pool_thumbnail(job_id):
+    """Video frame thumbnails are visible to every identified user; artifacts are not."""
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+    if job is None:
+        abort(404)
+    person = request.args.get("person", type=int)
+    if person is not None:
+        directory = job_dir(job_id)
+        path = os.path.join(directory, "persons", f"{person}.jpg")
+        if os.path.isfile(path):
+            return send_file(path, mimetype="image/jpeg", conditional=True, max_age=3600)
+        abort(404)
+    return thumbnail_response(job)
+
+
+def _cancel_members_locked(members, message):
+    """Stop queued members immediately and running ones at the next safe point."""
+    for member in members:
+        mid = member["id"]
+        if member["status"] == "queued":
+            JOB_QUEUE.remove(mid)
+            member.update(status="cancelled", message=message, finished=time.time())
+        elif member["status"] in ("running", "waiting_user", "cancel_requested"):
+            CANCEL_REQUESTS.add(mid)
+            member.update(status="cancel_requested",
+                          message="Stop requested; stopping at the next safe step")
+            slot = SELECTIONS.get(mid)
+            if slot is not None:
+                slot["event"].set()
+        _persist_job_locked(member)
+
+
+def _delete_jobs_core(job_ids, allowed, force=False):
+    """Remove jobs (and their scene members). ``force`` cancels active jobs and defers cleanup."""
+    deleted, skipped, deferred = [], [], []
+    with JOBS_LOCK:
         visited = set()
         for requested_id in job_ids:
             row = JOBS.get(requested_id)
+            if row is not None and job_owner(row) not in allowed:
+                skipped.append({"id": requested_id, "reason": "not found"})
+                continue
             job_id = (row.get("person_batch") or requested_id) if row else requested_id
             if job_id not in JOBS and row:
                 job_id = requested_id
@@ -2608,15 +3426,33 @@ def api_delete_jobs():
                 continue
             visited.add(job_id)
             job = JOBS.get(job_id)
-            if job is None:
-                if requested is not None:
-                    skipped.append({"id": job_id, "reason": "not found"})
+            if job is None or job_owner(job) not in allowed:
+                skipped.append({"id": job_id, "reason": "not found"})
                 continue
             members = _batch_members_locked(job_id) or [job]
-            if (any(j["status"] in ACTIVE_STATUSES or j.get('camera_state') in ACTIVE_CAMERA_STATES for j in members)
-                    or job.get("scene_state") in ACTIVE_STATUSES):
-                skipped.append({"id": job_id, "reason": "job is still active"})
-                continue
+            active = (any(j["status"] in ACTIVE_STATUSES or j.get('camera_state') in ACTIVE_CAMERA_STATES
+                          for j in members)
+                      or job.get("scene_state") in ACTIVE_STATUSES)
+            if active:
+                if not force:
+                    skipped.append({"id": job_id, "reason": "job is still active"})
+                    continue
+                if job.get("scene_state") in ("queued", "running"):
+                    job["scene_state"] = ("cancel_requested" if job.get("scene_state") == "running"
+                                          else "cancelled")
+                    _persist_job_locked(job)
+                _cancel_members_locked(members, "Deleted by admin")
+                # Queued members are already out of the queue, so only in-flight work needs to
+                # defer; otherwise nothing would ever trigger the deferred cleanup below.
+                running = (any(m["status"] in ("running", "waiting_user", "cancel_requested")
+                               or m.get("camera_state") in ("running", "cancel_requested")
+                               for m in members)
+                           or job.get("scene_state") in ("running", "cancel_requested"))
+                if running:
+                    pending = {member["id"] for member in members}
+                    ADMIN_DELETE_PENDING.update(pending)
+                    deferred.extend(sorted(pending))
+                    continue
             try:
                 work = Path(ARGS.work_dir).resolve()
                 root = Path(job_dir(job_id)).resolve()
@@ -2643,7 +3479,51 @@ def api_delete_jobs():
         CHARACTER_LIBRARY.forget_actors(deleted)
     except OSError:
         app.logger.warning("Could not remove deleted jobs from character preferences", exc_info=True)
-    return jsonify({"deleted": deleted, "skipped": skipped})
+    return {"deleted": deleted, "skipped": skipped, "deferred": deferred}
+
+
+def finalize_admin_deletions(job_id=None):
+    """Complete admin deletions whose jobs stopped at a safe point."""
+    ready = []
+    with JOBS_LOCK:
+        for cid in list(ADMIN_DELETE_PENDING):
+            if job_id is not None and cid != job_id:
+                continue
+            job = JOBS.get(cid)
+            if job is None:
+                ADMIN_DELETE_PENDING.discard(cid)
+                continue
+            parent_id = job.get("person_batch") or cid
+            parent = JOBS.get(parent_id)
+            members = _batch_members_locked(parent_id) or ([parent] if parent else [job])
+            busy = (any(m["status"] in ACTIVE_STATUSES or m.get("camera_state") in ("running", "cancel_requested")
+                        for m in members)
+                    or (parent or {}).get("scene_state") in ACTIVE_STATUSES)
+            if busy:
+                continue
+            for member in members:
+                ADMIN_DELETE_PENDING.discard(member["id"])
+            ready.append((cid, job_owner(parent or job)))
+    for cid, owner in ready:
+        _delete_jobs_core([cid], {owner}, force=True)
+
+
+@app.route("/api/jobs", methods=["DELETE"])
+def api_delete_jobs():
+    """Delete selected jobs, or all finished jobs when no ids are supplied."""
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return api_error("history_invalid_delete", "无效的历史删除请求。", 400)
+    requested = body.get("ids")
+    if requested is not None and (not isinstance(requested, list) or
+                                  any(not isinstance(job_id, str) for job_id in requested)):
+        return api_error("history_invalid_delete", "无效的历史删除请求。", 400)
+
+    allowed = accessible_owners()
+    with JOBS_LOCK:
+        job_ids = ([job_id for job_id in JOBS if job_owner(JOBS[job_id]) in allowed]
+                   if requested is None else list(dict.fromkeys(requested)))
+    return jsonify(_delete_jobs_core(job_ids, allowed))
 
 
 @app.route("/api/jobs/<job_id>/person/<int:index>.jpg")
@@ -2778,6 +3658,9 @@ def copy_fbx_template(file, path, kind):
 @app.route("/api/jobs/<job_id>/fbx", methods=["GET", "POST"])
 def api_fbx(job_id):
     job, source, available = motion_export_source(job_id)
+    blocked = rating_gate(job)
+    if blocked is not None:
+        return blocked
     if find_spec("fbx") is None:
         abort(404)
     profile = request.args.get("profile", "flowhmr")
@@ -3042,6 +3925,9 @@ def send_humanoid_motion(path, job, available, chosen, signature, format_name, e
 @app.get("/api/jobs/<job_id>/vmd")
 def api_vmd(job_id):
     job, source, available = motion_export_source(job_id)
+    blocked = rating_gate(job)
+    if blocked is not None:
+        return blocked
     try:
         chosen, signature = select_export_people(available)
     except UserMessage as error:
@@ -3077,6 +3963,9 @@ def api_vmd(job_id):
 @app.get("/api/jobs/<job_id>/vrma")
 def api_vrma(job_id):
     job, source, available = motion_export_source(job_id)
+    blocked = rating_gate(job)
+    if blocked is not None:
+        return blocked
     try:
         chosen, signature = select_export_people(available)
     except UserMessage as error:
@@ -3122,9 +4011,8 @@ def api_vrma(job_id):
     return send_humanoid_motion(path, job, available, chosen, signature, "vrma", extension)
 
 
-@app.route("/api/jobs/<job_id>/thumbnail.jpg")
-def api_thumbnail(job_id):
-    job = get_job(job_id)
+def thumbnail_response(job):
+    job_id = job["id"]
     directory = job_dir(job_id)
     person = job.get("selected_person") if job.get("person_batch") != job_id else None
     if person is not None:
@@ -3141,6 +4029,11 @@ def api_thumbnail(job_id):
         except FileNotFoundError:
             abort(404)
     return send_file(thumbnail, mimetype="image/jpeg", conditional=True, max_age=3600)
+
+
+@app.route("/api/jobs/<job_id>/thumbnail.jpg")
+def api_thumbnail(job_id):
+    return thumbnail_response(get_job(job_id))
 
 
 @app.route("/api/jobs/<job_id>/skeleton")
@@ -3169,6 +4062,9 @@ def api_skeleton(job_id):
 @app.get("/api/jobs/<job_id>/pmx-motion")
 def api_pmx_motion(job_id):
     job = get_job(job_id)
+    blocked = rating_gate(job)
+    if blocked is not None:
+        return blocked
     directory = job_dir(job_id)
     if job["status"] != "done" or not os.path.isfile(os.path.join(directory, "motion.npz")):
         abort(404)
@@ -3216,6 +4112,10 @@ def api_result(job_id, kind):
         return send_file(path, conditional=True)
     if kind not in _RESULT_FILES:
         abort(404)
+    if kind == "npz":
+        blocked = rating_gate(job)
+        if blocked is not None:
+            return blocked
     if kind == "npz" and job.get("person_batch") == job_id:
         if not job.get("scene"):
             abort(404)
@@ -3339,7 +4239,7 @@ def _build_paired_camera(job_id, *, check, notify):
             torch.cuda.empty_cache()
 
 
-CAMERA_TASKS = CameraTasks(get_job, job_dir, update_job, JOB_QUEUE.put, _build_paired_camera)
+CAMERA_TASKS = CameraTasks(get_job, job_dir, update_job, _enqueue_payload, _build_paired_camera)
 
 
 @requires_runtime
@@ -3352,6 +4252,502 @@ register_camera_routes(app, get_job, job_dir, _paired_camera_joints, CAMERA_TASK
                        queue_camera=_queue_paired_camera)
 
 
+# --------------------------------------------------------------------------- admin console
+def admin_pool_entries():
+    """Every job with admin visibility (full ratings, download links allowed)."""
+    with JOBS_LOCK:
+        rows = list(JOBS.values())
+        groups = defaultdict(list)
+        for row in rows:
+            if row.get("person_batch"):
+                groups[row["person_batch"]].append(row)
+        grouped = {mid for batch, members in groups.items() if batch in JOBS and len(members) > 1
+                   for mid in (row["id"] for row in members if row["id"] != batch)}
+        ordered = sorted(rows, key=history_key, reverse=True)
+        ordered = [_scene_status_locked(j, groups[j["id"]]) if len(groups.get(j["id"], ())) > 1 else j
+                   for j in ordered if j["id"] not in grouped]
+        snapshot = JOB_QUEUE.snapshot()
+        entries = []
+        for row in ordered:
+            entry = pool_entry(row, set(), snapshot["positions"])
+            entry["can_download"] = True
+            entry["rating"] = visible_rating(row, True)
+            entries.append(entry)
+    return entries, snapshot
+
+
+def admin_pool_stats(entries):
+    local = time.localtime()
+    midnight = time.mktime((local.tm_year, local.tm_mon, local.tm_mday, 0, 0, 0, 0, 0, -1))
+    scores = [entry["rating"]["score"] for entry in entries
+              if isinstance(entry.get("rating"), dict) and entry["rating"].get("score")]
+    return {
+        "total": len(entries),
+        "done_today": sum(1 for entry in entries
+                          if entry.get("status") == "done" and (entry.get("finished") or 0) >= midnight),
+        "failed": sum(1 for entry in entries if entry.get("status") == "failed"),
+        "ratings": len(scores),
+        "average_rating": round(sum(scores) / len(scores), 2) if scores else None,
+    }
+
+
+def admin_queue_snapshot():
+    snapshot = JOB_QUEUE.snapshot()
+    items = []
+    with JOBS_LOCK:
+        for index, item in enumerate(JOB_QUEUE.pending(), 1):
+            job = JOBS.get(item["job_id"]) or {}
+            items.append({**item, "position": index, "filename": job.get("filename"),
+                          "owner_name": owner_display_name(item["owner"]),
+                          "status": job.get("status"), "created": job.get("created")})
+        running = None
+        if snapshot["running"]:
+            job = JOBS.get(snapshot["running"]) or {}
+            running = {"job_id": snapshot["running"], "filename": job.get("filename"),
+                       "owner": job_owner(job), "owner_name": owner_display_name(job_owner(job)),
+                       "status": job.get("status"), "progress": job.get("progress")}
+    return {"paused": snapshot["paused"], "queued": snapshot["queued"], "running": running,
+            "by_owner": snapshot["by_owner"], "items": items,
+            "limits": {"owner": int(admin_setting("queue_limit_owner")),
+                       "total": int(admin_setting("queue_limit_total"))}}
+
+
+def admin_user_rows():
+    with JOBS_LOCK:
+        jobs = [copy.deepcopy(job) for job in JOBS.values()]
+    _, queued_by_owner = JOB_QUEUE.counts()
+    with USERS_LOCK:
+        users = {uid: copy.deepcopy(record) for uid, record in USERS.items()}
+
+    counts, disk = defaultdict(int), defaultdict(int)
+    sizes = {}
+    for job in jobs:
+        owner = job_owner(job)
+        counts[owner] += 1
+        job_id = job["id"]
+        if job_id in MEMBER_DIRS:
+            continue
+        if job_id not in sizes:
+            sizes[job_id] = dir_size(job_dir(job_id))
+        disk[owner] += sizes[job_id]
+
+    ips = defaultdict(set)
+    for uid, record in users.items():
+        for ip in ([record.get("first_ip"), record.get("last_ip")]
+                   + [entry.get("ip") for entry in record.get("ip_history") or []]):
+            if ip:
+                ips[ip].add(uid)
+
+    owners = set(users) | set(counts) | set(queued_by_owner)
+    rows = []
+    for uid in owners:
+        record = users.get(uid) or {}
+        mine = [ip for ip in ips if uid in ips[ip]]
+        rows.append({
+            "uid": uid, "name": owner_display_name(uid),
+            "created": record.get("created"), "last_seen": record.get("last_seen"),
+            "last_ip": record.get("last_ip"), "ips": sorted(mine),
+            "shared_ips": sorted(ip for ip in mine if len(ips[ip]) > 1),
+            "disabled": bool(record.get("disabled")),
+            "jobs": counts.get(uid, 0), "queued": queued_by_owner.get(uid, 0),
+            "disk_bytes": disk.get(uid, 0),
+        })
+    rows.sort(key=lambda row: (-(row["last_seen"] or 0), row["name"]))
+    return rows
+
+
+@app.get('/admin')
+def admin_page():
+    if not ADMIN_KEY:
+        abort(404)
+    return send_from_directory(WEB_DIR, "admin.html")
+
+
+@app.get('/api/admin/session')
+def api_admin_session():
+    if not ADMIN_KEY:
+        abort(404)
+    return jsonify(configured=True, authenticated=admin_session_valid())
+
+
+@app.post('/api/admin/login')
+def api_admin_login():
+    if not ADMIN_KEY:
+        abort(404)
+    ip = client_ip()
+    wait = admin_login_limited(ip)
+    if wait > 0:
+        audit_admin("login", result="limited", detail=f"retry in {int(wait)}s")
+        return api_error("admin_login_limited", "尝试次数过多，请稍后再试。", 429, retry_after=int(wait))
+    body = request.get_json(silent=True)
+    key = body.get("key") if isinstance(body, dict) else None
+    if not isinstance(key, str) or not hmac.compare_digest(key.encode("utf-8"), ADMIN_KEY.encode("utf-8")):
+        admin_login_failed(ip)
+        audit_admin("login", result="denied")
+        return api_error("admin_login_failed", "管理员密钥无效。", 401)
+    admin_login_succeeded(ip)
+    g.admin_ok = True
+    g.admin_refresh_cookie = True
+    audit_admin("login")
+    return jsonify(ok=True)
+
+
+@app.post('/api/admin/logout')
+def api_admin_logout():
+    error = admin_guard(write=True)
+    if error:
+        return error
+    g.admin_ok = False
+    g.admin_refresh_cookie = False
+    response = jsonify(ok=True)
+    response.delete_cookie(ADMIN_COOKIE, path="/")
+    audit_admin("logout")
+    return response
+
+
+@app.get('/api/admin/pool')
+def api_admin_pool():
+    error = admin_guard()
+    if error:
+        return error
+    entries, snapshot = admin_pool_entries()
+    return jsonify(jobs=entries, now=time.time(), queued=snapshot["queued"],
+                   running=snapshot["running"], by_owner=snapshot["by_owner"],
+                   paused=snapshot["paused"], positions=snapshot["positions"],
+                   models_loaded=ENGINE is not None, stats=admin_pool_stats(entries))
+
+
+@app.get('/api/admin/queue')
+def api_admin_queue():
+    error = admin_guard()
+    if error:
+        return error
+    return jsonify(admin_queue_snapshot())
+
+
+@app.post('/api/admin/queue')
+def api_admin_queue_action():
+    error = admin_guard(write=True)
+    if error:
+        return error
+    body = request.get_json(silent=True)
+    action = body.get("action") if isinstance(body, dict) else None
+    job_id = body.get("job_id") if isinstance(body, dict) else None
+    if action not in ("pause", "resume", "promote", "demote", "cancel", "cancel_running", "requeue", "clear"):
+        return api_error("admin_queue_invalid", "无效的队列操作。", 400)
+    if action in ("promote", "demote", "cancel", "cancel_running", "requeue") and not isinstance(job_id, str):
+        return api_error("admin_queue_invalid", "缺少任务 ID。", 400)
+
+    if action in ("pause", "resume"):
+        paused = JOB_QUEUE.set_paused(action == "pause")
+        audit_admin(f"queue.{action}", result="ok", detail="paused" if paused else "running")
+        UI_EVENTS.publish('jobs', {})
+        return jsonify({**admin_queue_snapshot(), "ok": True})
+
+    if action == "clear":
+        removed = JOB_QUEUE.clear()
+        with JOBS_LOCK:
+            for jid in removed:
+                row = JOBS.get(jid)
+                if row is not None and row.get("status") == "queued":
+                    row.update(status="cancelled", message="Queue cleared by admin", finished=time.time())
+                    _persist_job_locked(row)
+        audit_admin("queue.clear", result="ok", detail=f"{len(removed)} queued job(s)")
+        UI_EVENTS.publish('jobs', {})
+        return jsonify({**admin_queue_snapshot(), "ok": True})
+
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+    if job is None:
+        abort(404)
+
+    if action in ("promote", "demote"):
+        highest, lowest = JOB_QUEUE.priority_bounds()
+        priority = highest + 1 if action == "promote" else lowest - 1
+        if not JOB_QUEUE.set_priority(job_id, priority):
+            return api_error("admin_queue_invalid", "任务不在排队中。", 409)
+        with JOBS_LOCK:
+            row = JOBS.get(job_id)
+            if row is not None:
+                row["priority"] = priority
+                _persist_job_locked(row)
+        audit_admin(f"queue.{action}", target=job_id, result="ok", detail=f"priority={priority}")
+    elif action == "cancel":
+        removed = JOB_QUEUE.remove(job_id)
+        with JOBS_LOCK:
+            row = JOBS.get(job_id)
+            if removed and row is not None:
+                row.update(status="cancelled", message="Stopped by admin", finished=time.time())
+                _persist_job_locked(row)
+        if not removed:
+            return api_error("admin_queue_invalid", "任务不在排队中。", 409)
+        audit_admin("queue.cancel", target=job_id)
+    elif action == "cancel_running":
+        if JOB_QUEUE.running_job() != job_id:
+            return api_error("admin_queue_invalid", "任务不在运行中。", 409)
+        with JOBS_LOCK:
+            row = JOBS.get(job_id)
+            if row is None:
+                abort(404)
+            CANCEL_REQUESTS.add(job_id)
+            row.update(status="cancel_requested",
+                       message="Stop requested by admin; stopping at the next safe step")
+            _persist_job_locked(row)
+            slot = SELECTIONS.get(job_id)
+            if slot is not None:
+                slot["event"].set()
+        audit_admin("queue.cancel_running", target=job_id, result="ok", detail="safe-point stop requested")
+    else:  # requeue
+        with JOBS_LOCK:
+            row = JOBS.get(job_id)
+            if row is None:
+                abort(404)
+            if row.get("person_batch") == job_id and _batch_members_locked(job_id):
+                return api_error("admin_queue_invalid", "场景任务请使用重跑。", 409)
+            if row.get("status") not in ("cancelled", "failed"):
+                return api_error("admin_queue_invalid", "只能重新入队已取消或失败的任务。", 409)
+            row.update(status="queued", message="", error=None, error_code=None, error_params={},
+                       finished=None, progress=0, loading_models=False)
+            for stage in row.get("stages") or []:
+                if stage.get("status") == "failed":
+                    stage["status"] = "pending"
+            _persist_job_locked(row)
+            queued_job = copy.deepcopy(row)
+        enqueue(queued_job)
+        audit_admin("queue.requeue", target=job_id)
+    UI_EVENTS.publish('jobs', {'job_id': job_id})
+    return jsonify({**admin_queue_snapshot(), "ok": True})
+
+
+@app.delete('/api/admin/jobs/<job_id>')
+def api_admin_delete_job(job_id):
+    error = admin_guard(write=True)
+    if error:
+        return error
+    with JOBS_LOCK:
+        owner = job_owner(JOBS[job_id]) if job_id in JOBS else None
+    if owner is None:
+        audit_admin("job.delete", target=job_id, result="not_found")
+        abort(404)
+    result = _delete_jobs_core([job_id], {owner}, force=True)
+    audit_admin("job.delete", target=job_id, result="deleted" if result["deleted"] else "deferred",
+                detail=f"deleted={result['deleted']} deferred={result['deferred']}")
+    UI_EVENTS.publish('jobs', {'job_id': job_id})
+    return jsonify(result)
+
+
+@app.get('/api/admin/users')
+def api_admin_users():
+    error = admin_guard()
+    if error:
+        return error
+    return jsonify(users=admin_user_rows(), now=time.time())
+
+
+@app.patch('/api/admin/users/<uid>')
+def api_admin_update_user(uid):
+    error = admin_guard(write=True)
+    if error:
+        return error
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or not set(body) <= {"name", "disabled"}:
+        return api_error("admin_user_invalid", "无效的用户修改请求。", 400)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", uid):
+        return api_error("admin_user_invalid", "无效的用户 ID。", 400)
+    name = body.get("name")
+    if name is not None:
+        name = " ".join(name.split())[:24] if isinstance(name, str) else ""
+        if not name:
+            return api_error("user_name_invalid", "昵称不能为空。", 400)
+    changes = {}
+    with USERS_LOCK:
+        record = USERS.setdefault(uid, _normalize_user(uid, {}))
+        if name is not None:
+            record["name"] = name
+            changes["name"] = name
+        if "disabled" in body:
+            if not isinstance(body["disabled"], bool):
+                return api_error("admin_user_invalid", "disabled 必须是布尔值。", 400)
+            record["disabled"] = body["disabled"]
+            changes["disabled"] = body["disabled"]
+        save_users_locked()
+    audit_admin("user.update", target=uid, result="ok", detail=json.dumps(changes, ensure_ascii=False))
+    row = next((item for item in admin_user_rows() if item["uid"] == uid), None)
+    return jsonify(user=row)
+
+
+@app.get('/api/admin/users/<uid>/ips')
+def api_admin_user_ips(uid):
+    error = admin_guard()
+    if error:
+        return error
+    with USERS_LOCK:
+        record = copy.deepcopy(USERS.get(uid))
+    if record is None:
+        abort(404)
+    return jsonify(uid=uid, name=owner_display_name(uid), ips=record.get("ip_history") or [],
+                   first_ip=record.get("first_ip"), last_ip=record.get("last_ip"))
+
+
+@app.route('/api/admin/settings', methods=['GET', 'PATCH'])
+def api_admin_settings():
+    error = admin_guard(write=request.method == 'PATCH')
+    if error:
+        return error
+    if request.method == 'PATCH':
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or not body or not set(body) <= set(ADMIN_SETTINGS_DEFAULTS):
+            return api_error("admin_settings_invalid", "无效的设置请求。", 400)
+        ranges = {"queue_limit_owner": (1, 200), "queue_limit_total": (1, 2000),
+                  "rating_threshold": (1, 5), "history_days": (1, 3650)}
+        with ADMIN_SETTINGS_LOCK:
+            for key, value in body.items():
+                default = ADMIN_SETTINGS_DEFAULTS[key]
+                if isinstance(default, bool):
+                    if not isinstance(value, bool):
+                        return api_error("admin_settings_invalid", f"{key} 必须是布尔值。", 400)
+                elif isinstance(default, int):
+                    if type(value) is not int:
+                        return api_error("admin_settings_invalid", f"{key} 必须是整数。", 400)
+                    low, high = ranges.get(key, (0, 10 ** 9))
+                    if not low <= value <= high:
+                        return api_error("admin_settings_invalid", f"{key} 超出范围。", 400)
+                ADMIN_SETTINGS[key] = value
+            save_admin_settings_locked()
+            settings = dict(ADMIN_SETTINGS)
+        audit_admin("settings.update", result="ok", detail=json.dumps(body, ensure_ascii=False))
+        return jsonify(settings=settings)
+    with ADMIN_SETTINGS_LOCK:
+        settings = dict(ADMIN_SETTINGS or ADMIN_SETTINGS_DEFAULTS)
+    return jsonify(settings=settings, defaults=dict(ADMIN_SETTINGS_DEFAULTS))
+
+
+@app.get('/api/admin/storage')
+def api_admin_storage():
+    error = admin_guard()
+    if error:
+        return error
+    with JOBS_LOCK:
+        jobs = [copy.deepcopy(job) for job in JOBS.values()]
+    by_owner, by_status = defaultdict(lambda: {"jobs": 0, "bytes": 0}), defaultdict(lambda: {"jobs": 0, "bytes": 0})
+    job_bytes, sizes = 0, {}
+    for job in jobs:
+        owner, job_id = job_owner(job), job["id"]
+        by_status[job.get("status") or "unknown"]["jobs"] += 1
+        by_owner[owner]["jobs"] += 1
+        if job_id in MEMBER_DIRS:
+            continue
+        if job_id not in sizes:
+            sizes[job_id] = dir_size(job_dir(job_id))
+        job_bytes += sizes[job_id]
+        by_status[job.get("status") or "unknown"]["bytes"] += sizes[job_id]
+        by_owner[owner]["bytes"] += sizes[job_id]
+    orphans = []
+    try:
+        for name in os.listdir(ARGS.work_dir):
+            path = os.path.join(ARGS.work_dir, name)
+            if os.path.isdir(path) and name not in JOBS:
+                orphans.append({"id": name, "bytes": dir_size(path)})
+    except OSError:
+        pass
+    meta_bytes = 0
+    for name in ("users.json", "ratings.jsonl", "admin_settings.json", "admin_audit.jsonl"):
+        try:
+            meta_bytes += os.path.getsize(os.path.join(ARGS.work_dir, name))
+        except OSError:
+            continue
+    return jsonify(total_bytes=job_bytes + meta_bytes, job_bytes=job_bytes, meta_bytes=meta_bytes,
+                   job_count=len(jobs), by_owner=[{"owner": owner, "name": owner_display_name(owner), **value}
+                                                  for owner, value in sorted(by_owner.items())],
+                   by_status={status: value for status, value in by_status.items()}, orphans=orphans)
+
+
+@app.post('/api/admin/storage/cleanup')
+def api_admin_cleanup():
+    error = admin_guard(write=True)
+    if error:
+        return error
+    body = request.get_json(silent=True) or {}
+    action = body.get("action") if isinstance(body, dict) else None
+    if action not in ("finished_older", "legacy", "orphans"):
+        return api_error("admin_cleanup_invalid", "无效的清理操作。", 400)
+    freed, removed_orphans = 0, []
+    if action == "orphans":
+        with JOBS_LOCK:
+            known = set(JOBS)
+        try:
+            for name in os.listdir(ARGS.work_dir):
+                path = Path(ARGS.work_dir, name).resolve()
+                if Path(ARGS.work_dir).resolve() not in path.parents or name in known or not path.is_dir():
+                    continue
+                freed += dir_size(path)
+                shutil.rmtree(path)
+                removed_orphans.append(name)
+        except OSError as e:
+            app.logger.warning("Could not remove orphan folders", exc_info=True)
+            audit_admin("storage.cleanup", target="orphans", result="failed", detail=str(e))
+            return api_error("admin_cleanup_failed", "清理未完成的目录失败。", 500)
+        result = {"deleted": [], "skipped": [], "orphans": removed_orphans}
+    else:
+        days = body.get("days")
+        if days is None:
+            days = int(admin_setting("history_days"))
+        if type(days) is not int or not 1 <= days <= 3650:
+            return api_error("admin_cleanup_invalid", "天数无效。", 400)
+        cutoff = time.time() - days * 86400
+        with JOBS_LOCK:
+            targets = []
+            for job_id, job in JOBS.items():
+                if job.get("status") not in ("done", "failed", "cancelled"):
+                    continue
+                if action == "legacy" and job_owner(job) != LEGACY_OWNER:
+                    continue
+                if (job.get("finished") or 0) < cutoff:
+                    targets.append(job_id)
+        result = _delete_jobs_core(targets, admin_owner_set(), force=False)
+    audit_admin("storage.cleanup", target=action, result="ok",
+                detail=f"deleted={result['deleted']} orphans={removed_orphans} freed={freed}")
+    UI_EVENTS.publish('jobs', {})
+    return jsonify({**result, "freed_bytes": freed})
+
+
+def admin_owner_set():
+    with JOBS_LOCK:
+        return {job_owner(job) for job in JOBS.values()}
+
+
+@app.get('/api/admin/audit')
+def api_admin_audit():
+    error = admin_guard()
+    if error:
+        return error
+    limit = min(max(request.args.get("limit", type=int) or 100, 1), 500)
+    offset = max(request.args.get("offset", type=int) or 0, 0)
+    action_filter = (request.args.get("action") or "").strip()
+    result_filter = (request.args.get("result") or "").strip()
+    path = audit_path()
+    rows = []
+    if path and os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as stream:
+                lines = stream.readlines()
+        except OSError:
+            lines = []
+        for line in reversed(lines):
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            if action_filter and not str(row.get("action", "")).startswith(action_filter):
+                continue
+            if result_filter and row.get("result") != result_filter:
+                continue
+            rows.append(row)
+    return jsonify(entries=rows[offset:offset + limit], total=len(rows), offset=offset, limit=limit)
+
+
 # --------------------------------------------------------------------------- main
 def parse_args():
     p = argparse.ArgumentParser(prog="app.py", description="FlowHMR web demo")
@@ -3362,6 +4758,10 @@ def parse_args():
     p.add_argument("--device", default="auto", help=DEVICE_HELP)
     p.add_argument("--sam-chunk-default", type=int, default=16, help="Initial value in the manual batch field")
     p.add_argument("--work_dir", default=os.path.join(REPO_ROOT, "output", "web_jobs"))
+    p.add_argument("--trust-proxy", action="store_true",
+                   help="Trust the rightmost X-Forwarded-For hop as client IP (only behind a trusted proxy)")
+    p.add_argument("--admin-key", default=None,
+                   help="Enable the /admin console with this secret (or set FLOWHMR_ADMIN_KEY)")
     args = p.parse_args()
     if args.sam_chunk_default < 1:
         p.error("--sam-chunk-default must be a positive integer")
@@ -3374,8 +4774,9 @@ def parse_args():
 
 
 def main():
-    global ARGS, INSPECTION
+    global ARGS, INSPECTION, ADMIN_KEY
     ARGS = parse_args()
+    ADMIN_KEY = (ARGS.admin_key or os.environ.get("FLOWHMR_ADMIN_KEY") or "").strip()
     if ARGS.ckpt:
         ARGS.ckpt = os.path.abspath(ARGS.ckpt)
     if ARGS.model_cfg:
@@ -3383,11 +4784,15 @@ def main():
     ARGS.work_dir = os.path.abspath(ARGS.work_dir)
     os.makedirs(ARGS.work_dir, exist_ok=True)
     ensure_model_folders()
+    load_users()
     restore_jobs()
+    load_admin_settings()
     os.chdir(REPO_ROOT)  # body-model / asset paths are repo-relative
     INSPECTION = PreviewInspection()
     threading.Thread(target=worker_loop, daemon=True).start()
     print(f"\n  FlowHMR web demo ready:  http://{ARGS.host}:{ARGS.port}\n")
+    if ADMIN_KEY:
+        print(f"  Admin console:           http://{ARGS.host}:{ARGS.port}/admin\n")
     # The page refreshes the job list every few seconds; drop those access-log
     # lines so the console stays readable. Other requests still log normally.
     class _QuietJobPolling(logging.Filter):

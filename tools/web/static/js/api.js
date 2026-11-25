@@ -36,6 +36,10 @@ const postJson = (path, body, signal) => json(path, {
 });
 
 export const getInfo = () => json("/api/info", { cache: "no-store" });
+export const getMe = () => json("/api/me", { cache: "no-store" });
+export const saveName = (name) => json("/api/me", {
+  method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }),
+});
 export const getModelDownload = () => json("/api/models/download", { cache: "no-store" });
 export const startModelDownload = (group) => postJson("/api/models/download", group ? { group } : {});
 export const stopModelDownload = (id) => postJson("/api/models/download/stop", { id });
@@ -58,6 +62,11 @@ export const deleteJobs = (ids) => json("/api/jobs", {
   body: JSON.stringify(ids ? { ids } : {}),
 });
 export const getJob = (id) => json(`/api/jobs/${id}`);
+export const getPool = () => json("/api/pool", { cache: "no-store" });
+export const saveRating = (id, rating) => postJson(`/api/jobs/${id}/rating`, rating);
+export const clearRating = (id) => json(`/api/jobs/${id}/rating`, { method: "DELETE" });
+export const poolThumbnailUrl = (id, person = null) =>
+  `/api/pool/${id}/thumbnail.jpg${person == null ? "" : `?person=${person}`}`;
 export const getMeta = (id, signal) => json(`/api/jobs/${id}/meta`, { signal });
 export const getVertices = (id, signal, body = "neutral") => request(`/api/jobs/${id}/vertices?body=${encodeURIComponent(body)}`, { signal }).then((r) => r.arrayBuffer());
 export const getFaces = (id, signal) => request(`/api/jobs/${id}/faces`, { signal }).then((r) => r.arrayBuffer());

@@ -17,6 +17,7 @@ import { initMotionExport } from "./motion-export.js";
 import { initUpdates } from "./update.js";
 import { initMcpDialog } from "./mcp.js";
 import { initUIEvents } from './ui-events.js';
+import { initRating } from "./rating.js";
 
 setupLocalization();
 initMcpDialog();
@@ -51,6 +52,8 @@ const bus = createBus();
 initLayout();
 let info = null;
 let currentJob = null;
+let currentUser = null;
+let lastJobKey = "flowhmr-last-job";
 let loadedResult = null;
 let paramsShownFor = null;
 let restoreParameterDraft = false;
@@ -59,6 +62,8 @@ let pollVersion = 0;
 let currentRevision = null;
 let knownJobs = null;
 const ACTIVE = new Set(["queued", "running", "waiting_user", "cancel_requested"]);
+const ownsJob = (job) => !currentUser || job?.owner_id === currentUser.uid
+  || (currentUser.local && (job?.owner_id === "mcp" || job?.owner_id === "legacy"));
 
 const upload = initUpload(bus);
 for (const [menu, target] of [["menuImport", "fileInput"], ["menuNpz", "dlNpz"]]) {
@@ -96,6 +101,7 @@ window.addEventListener('flowhmr:server-update', event => {
 const motionExport = initMotionExport(() => viewer.bodyVariant, viewer);
 const trim = initTrim({ ...preview, seek: viewer.seekSourceFrame });
 const history = initHistory({ onOpen: (id) => openJob(id, { focus: true }), onRerun: rerun, onDeleted: clearDeletedJobs, onUpdated: syncExternalJobs });
+const rating = initRating({ onSaved: () => { void poll(); void history.refresh(); } });
 const runtime = initRuntimeDialog();
 let params = null;
 
@@ -135,7 +141,30 @@ initModelDialog(async () => {
   return next.model_files;
 });
 
+async function editUserName() {
+  if (!currentUser) return;
+  const entered = window.prompt(m("user.rename_prompt"), currentUser.name);
+  if (entered === null) return;
+  const name = entered.trim();
+  if (!name || name === currentUser.name) return;
+  try {
+    currentUser = await api.saveName(name);
+    setText($("userName"), currentUser.name);
+    $("btnUser").title = `${currentUser.name} · ${currentUser.ip}`;
+  } catch {
+    progress.showActionError(m("user.rename_failed"));
+  }
+}
+
 // ------------------------------------------------------------------ boot
+const me = await api.getMe().catch(() => null);
+if (me) {
+  currentUser = me;
+  lastJobKey = `flowhmr-last-job:${me.uid}`;
+  setText($("userName"), me.name);
+  $("btnUser").title = `${me.name} · ${me.ip}`;
+}
+$("btnUser").addEventListener("click", editUserName);
 try {
   applyModelInfo(await api.getInfo());
   setText($("uploadHint"), m("source.size_limit", { max: info.max_upload_mb }));
@@ -150,14 +179,22 @@ params = initParams(info?.defaults ?? {}, info?.sam_manual_default ?? 24,
   !!info?.sam_hybrid_available, !!info?.camera_on_cpu_for_amd_igpu);
 if (info?.runtime?.supported) runtime.restore();
 const jobs = (await history.refresh()) ?? [];
-const savedJob = localStorage.getItem("flowhmr-last-job");
+const savedJob = localStorage.getItem(lastJobKey);
 let initialJob = jobs.find((job) => job.status === "waiting_user" || job.status === "running")
   ?? jobs.find((job) => ACTIVE.has(job.status))
   ?? jobs.find((job) => job.id === savedJob);
 if (!initialJob && savedJob) {
-  try { initialJob = await api.getJob(savedJob); } catch { /* job may have been deleted */ }
+  try {
+    const job = await api.getJob(savedJob);
+    if (ownsJob(job)) initialJob = job;
+  } catch { /* job may have been deleted */ }
 }
 initialJob ??= jobs.find((job) => job.status === "done") ?? jobs[0];
+// Admin deep link: /?job=<id> opens any task, ownership is enforced by the server.
+const requestedJob = new URLSearchParams(location.search).get("job");
+if (requestedJob) {
+  try { initialJob = await api.getJob(requestedJob); } catch { /* keep own history fallback */ }
+}
 if (initialJob) void openJob(initialJob.id, { restoreDraft: true });
 syncSubmit();
 if (info) confirmWorkspaceReady();
@@ -276,6 +313,7 @@ function resetJobView() {
   currentRevision = null;
   person.reset();
   preview.setTrack(null);
+  rating.update(null);
   viewer.clear();
   trim.clear();
   show("btnRerun", false);
@@ -286,7 +324,7 @@ function resetJobView() {
 }
 
 function clearDeletedJobs(ids) {
-  if (ids.includes(localStorage.getItem("flowhmr-last-job"))) localStorage.removeItem("flowhmr-last-job");
+  if (ids.includes(localStorage.getItem(lastJobKey))) localStorage.removeItem(lastJobKey);
   if (!ids.includes(currentJob)) return;
   resetJobView();
   history.setCurrent(null);
@@ -302,7 +340,7 @@ function revision(job) {
     job.person_count ?? null, job.message ?? null, job.loading_models ?? null, job.scene_state ?? null,
     job.source_frames ?? null, job.stages ?? null, job.sam_batch ?? null, job.camera ?? null,
     job.camera_state ?? null, job.camera_progress ?? null, job.camera_finished ?? null,
-    job.camera_available ?? null, job.camera_revision ?? null]);
+    job.camera_available ?? null, job.camera_revision ?? null, job.rating?.score ?? null]);
 }
 
 function syncExternalJobs(jobs, polling) {
@@ -325,7 +363,7 @@ async function openJob(id, { restoreDraft = false, focus = false } = {}) {
   restoreParameterDraft = restoreDraft;
   trim.begin();
   paramsShownFor = null;
-  localStorage.setItem("flowhmr-last-job", id);
+  localStorage.setItem(lastJobKey, id);
   history.setCurrent(id);
   // The clicked history row keeps keyboard focus, so Space would re-open it instead
   // of playing. Move the shortcut scope to the 3D viewport.
@@ -365,6 +403,7 @@ async function poll() {
     : "job.generating"));
   preview.showJob(api.videoUrl(id, job.has_preview_video, job.has_annotated_video), () => jobLabel(job));
   person.update(job);
+  rating.update(job);
   trim.setSource(job.source_frames);
   trim.setEditable(!ACTIVE.has(job.status));
   if (paramsShownFor !== id) {

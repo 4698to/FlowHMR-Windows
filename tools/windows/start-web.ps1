@@ -46,6 +46,22 @@ $url = "http://127.0.0.1:$Port"
 $logDir = Join-Path $projectRoot 'logs'
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 $stateFile = Join-Path $logDir 'web-process.json'
+function Save-FlowHMRState([string]$Path, [hashtable]$State) {
+    # Another start/stop run or a scanner can briefly hold the record; retry, then keep going.
+    $json = $State | ConvertTo-Json
+    $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($json)
+    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+        try {
+            $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+            try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+            return $true
+        } catch {
+            Start-Sleep -Milliseconds 250
+        }
+    }
+    Write-Warning "Could not record the FlowHMR process in $Path because the file is in use. The service keeps running; close the program holding it and run stop-web.cmd to clear it."
+    return $false
+}
 if ($Foreground) {
     $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
     try { $listener.Start() } catch { throw "Port $Port is occupied. Close the other FlowHMR window or pass -Port with another port." } finally { $listener.Stop() }
@@ -54,7 +70,7 @@ if ($Foreground) {
     foreach ($lanIp in $lanIps) { Write-Host "LAN access: http://${lanIp}:$Port" }
     Write-Host 'Keep this window open. Close it (or press Ctrl+C) to stop the service.'
     $serverProcess = Start-Process -FilePath $pythonExe -ArgumentList @('-u','app.py','--host','0.0.0.0','--port',"$Port",'--sam-chunk-default','24') -WorkingDirectory $projectRoot -NoNewWindow -PassThru
-    @{pid=$serverProcess.Id;port=$Port;root=$projectRoot} | ConvertTo-Json | Set-Content -LiteralPath $stateFile -Encoding UTF8
+    Save-FlowHMRState $stateFile @{pid=$serverProcess.Id;port=$Port;root=$projectRoot} | Out-Null
     $deadline = (Get-Date).AddMinutes(5)
     while (-not $serverProcess.HasExited -and (Get-Date) -lt $deadline) {
         try {
@@ -139,7 +155,7 @@ if ($null -eq $serverProcess) {
     $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
     try { $listener.Start() } catch { throw "Port $Port is occupied. Choose another port with -Port or stop the existing server." } finally { $listener.Stop() }
     $serverProcess = Start-Process -FilePath $pythonExe -ArgumentList @('-u','app.py','--host','127.0.0.1','--port',"$Port",'--sam-chunk-default','24') -WorkingDirectory $projectRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logDir 'web.stdout.log') -RedirectStandardError (Join-Path $logDir 'web.stderr.log') -PassThru
-    @{pid=$serverProcess.Id;port=$Port;root=$projectRoot} | ConvertTo-Json | Set-Content -LiteralPath $stateFile -Encoding UTF8
+    Save-FlowHMRState $stateFile @{pid=$serverProcess.Id;port=$Port;root=$projectRoot} | Out-Null
     Write-Host "Starting FlowHMR. Logs: $logDir"
 }
 $deadline = (Get-Date).AddMinutes(5)
