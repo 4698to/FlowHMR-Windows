@@ -1,0 +1,407 @@
+{
+  "skeleton": "MetaHuman",
+  "profile": "metahuman",
+  "source": "flowhmr/core/export/fbx_profiles.py _body_layout",
+  "total_bones": 56,
+  "notes": [
+    "required=false 表示模板可以缺少：spine_04、spine_05、neck_02；spine_01 到 spine_03、neck_01 必须有。",
+    "骨骼名使用 Unreal / MetaHuman 的 <名称>_<序号>_<左右> 形式，左右为 l / r。",
+    "手指链顺序为 index、middle、pinky、ring、thumb，每指 01-03。",
+    "模板中可额外存在 index_metacarpal_l 等掌骨和 upperarm_twist_01_l 等扭转骨，导出不驱动这些骨骼。",
+    "导出写入用户提供的 MetaHuman 身体模板，只导出动画，不含网格，每个文件一人。"
+  ],
+  "bones": [
+    {
+      "index": 0,
+      "name": "root",
+      "parent": null,
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 1,
+      "name": "pelvis",
+      "parent": "root",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 2,
+      "name": "spine_01",
+      "parent": "pelvis",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 3,
+      "name": "spine_02",
+      "parent": "spine_01",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 4,
+      "name": "spine_03",
+      "parent": "spine_02",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 5,
+      "name": "spine_04",
+      "parent": "spine_03",
+      "type": "joint",
+      "required": false
+    },
+    {
+      "index": 6,
+      "name": "spine_05",
+      "parent": "spine_04",
+      "type": "joint",
+      "required": false
+    },
+    {
+      "index": 7,
+      "name": "neck_01",
+      "parent": "spine_05",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 8,
+      "name": "neck_02",
+      "parent": "neck_01",
+      "type": "joint",
+      "required": false
+    },
+    {
+      "index": 9,
+      "name": "head",
+      "parent": "neck_02",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 10,
+      "name": "thigh_l",
+      "parent": "pelvis",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 11,
+      "name": "calf_l",
+      "parent": "thigh_l",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 12,
+      "name": "foot_l",
+      "parent": "calf_l",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 13,
+      "name": "ball_l",
+      "parent": "foot_l",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 14,
+      "name": "clavicle_l",
+      "parent": "spine_05",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 15,
+      "name": "upperarm_l",
+      "parent": "clavicle_l",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 16,
+      "name": "lowerarm_l",
+      "parent": "upperarm_l",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 17,
+      "name": "hand_l",
+      "parent": "lowerarm_l",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 18,
+      "name": "index_01_l",
+      "parent": "hand_l",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 19,
+      "name": "index_02_l",
+      "parent": "index_01_l",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 20,
+      "name": "index_03_l",
+      "parent": "index_02_l",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 21,
+      "name": "middle_01_l",
+      "parent": "hand_l",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 22,
+      "name": "middle_02_l",
+      "parent": "middle_01_l",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 23,
+      "name": "middle_03_l",
+      "parent": "middle_02_l",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 24,
+      "name": "pinky_01_l",
+      "parent": "hand_l",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 25,
+      "name": "pinky_02_l",
+      "parent": "pinky_01_l",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 26,
+      "name": "pinky_03_l",
+      "parent": "pinky_02_l",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 27,
+      "name": "ring_01_l",
+      "parent": "hand_l",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 28,
+      "name": "ring_02_l",
+      "parent": "ring_01_l",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 29,
+      "name": "ring_03_l",
+      "parent": "ring_02_l",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 30,
+      "name": "thumb_01_l",
+      "parent": "hand_l",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 31,
+      "name": "thumb_02_l",
+      "parent": "thumb_01_l",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 32,
+      "name": "thumb_03_l",
+      "parent": "thumb_02_l",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 33,
+      "name": "thigh_r",
+      "parent": "pelvis",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 34,
+      "name": "calf_r",
+      "parent": "thigh_r",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 35,
+      "name": "foot_r",
+      "parent": "calf_r",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 36,
+      "name": "ball_r",
+      "parent": "foot_r",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 37,
+      "name": "clavicle_r",
+      "parent": "spine_05",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 38,
+      "name": "upperarm_r",
+      "parent": "clavicle_r",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 39,
+      "name": "lowerarm_r",
+      "parent": "upperarm_r",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 40,
+      "name": "hand_r",
+      "parent": "lowerarm_r",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 41,
+      "name": "index_01_r",
+      "parent": "hand_r",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 42,
+      "name": "index_02_r",
+      "parent": "index_01_r",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 43,
+      "name": "index_03_r",
+      "parent": "index_02_r",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 44,
+      "name": "middle_01_r",
+      "parent": "hand_r",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 45,
+      "name": "middle_02_r",
+      "parent": "middle_01_r",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 46,
+      "name": "middle_03_r",
+      "parent": "middle_02_r",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 47,
+      "name": "pinky_01_r",
+      "parent": "hand_r",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 48,
+      "name": "pinky_02_r",
+      "parent": "pinky_01_r",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 49,
+      "name": "pinky_03_r",
+      "parent": "pinky_02_r",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 50,
+      "name": "ring_01_r",
+      "parent": "hand_r",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 51,
+      "name": "ring_02_r",
+      "parent": "ring_01_r",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 52,
+      "name": "ring_03_r",
+      "parent": "ring_02_r",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 53,
+      "name": "thumb_01_r",
+      "parent": "hand_r",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 54,
+      "name": "thumb_02_r",
+      "parent": "thumb_01_r",
+      "type": "joint",
+      "required": true
+    },
+    {
+      "index": 55,
+      "name": "thumb_03_r",
+      "parent": "thumb_02_r",
+      "type": "joint",
+      "required": true
+    }
+  ]
+}

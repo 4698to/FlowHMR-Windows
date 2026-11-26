@@ -24,7 +24,7 @@ from flowhmr.device_support import DEVICE_HELP, DeviceError, plan_device, resolv
 from flowhmr.runtime_environments import RUNTIME
 
 OUTPUT_ROOT = os.path.join(REPO_ROOT, "output")
-VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v")
+VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".gif", ".webp")
 
 
 def collect_videos(inputs):

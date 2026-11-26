@@ -14,6 +14,7 @@ import binascii
 import copy
 import hashlib
 import hmac
+import http.client
 import json
 import logging
 import math
@@ -21,22 +22,26 @@ import mimetypes
 import os
 import re
 import shutil
+import subprocess
+import ssl
 import sys
 import tempfile
 import threading
 import time
 import traceback
+import urllib.error
+import urllib.request
 import uuid
 from collections import defaultdict
 from contextlib import closing, contextmanager, nullcontext
 from functools import wraps
 from importlib.util import find_spec
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile
 
 import numpy as np
-from flask import Flask, Response, abort, g, jsonify, request, send_file, send_from_directory
+from flask import Flask, Response, abort, g, jsonify, redirect, request, send_file, send_from_directory
 from werkzeug.serving import make_server
 
 WEB_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -75,7 +80,7 @@ from flowhmr.mcp.characters import BONES, PosePatch, can_request_ik, empty_pose,
 from flowhmr.mcp.activity import Activity
 from flowhmr.mcp.events import UIEvents
 
-VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
+VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".gif", ".webp"}
 STAGES = [
     ("detection", "Detection", "YOLOX person detection & tracking"),
     ("camera", "Camera", "VGGT-Omega camera estimation"),
@@ -285,12 +290,123 @@ JOB_PATH_PATTERN = re.compile(r"/api/jobs/([^/]+)(?:/.*)?")
 USERS = {}                # uid -> nickname, first/last seen, IP history (users.json)
 USERS_LOCK = threading.Lock()
 USERS_SAVED_AT = 0.0      # throttles users.json writes during job polling
+
+# Reference library login (OAuth2). See docs/reference-lib-user-integration.md.
+RL_OWNER_PATTERN = re.compile(r"rl:(\d{1,20})")
+AUTH_MODES = ("local", "optional", "reference")
+AUTH_COOKIE = "flowhmr_auth"
+AUTH_PENDING_COOKIE = "flowhmr_auth_pending"
+AUTH_HEADER = "X-FlowHMR-Auth"
+AUTH_STATE_TTL = 300
+AUTH_REFRESH_MARGIN = 300
+AUTH_SESSION_COOKIE_PATTERN = re.compile(r"[a-f0-9]{64}")
+DEFAULT_REFERENCE_LIB_BASE_URL = "http://anim.nd.com.cn/api/openapi/v1/reference_lib"
+AUTH_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auth_config.json")
+
+# 99U result notifications. See docs/99u-notify.md.
+NOTIFY_ENABLED = False
+NOTIFY_APP_ID = ""
+NOTIFY_SECRET = ""
+NOTIFY_BASE_URL = "http://anim.nd.com.cn/api/99u/v1"
+NOTIFY_SENDER = ""
+NOTIFY_ORG = "ND"
+NOTIFY_RECEIVER_FIELD = "code"   # accounts.json field used as the 99U receiver (登录名)
+NOTIFY_SENT = set()       # (job_id, status, finished) already handed to 99U
+NOTIFY_LOCK = threading.Lock()
+NOTIFY_TIMEOUT = 60.0
+NOTIFY_HEADER_PREFIXES = ("content-type:", "content-length:", "transfer-encoding:")
+
+
+def load_auth_config(path):
+    """Read the standalone app config; a missing file just means "use defaults"."""
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as error:
+        print(f"[auth] ignored {path}: {error}")
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _config_flag(value, default):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def apply_auth_config(path=None, mode_override=None):
+    """(Re)load auth_config.json into the module-level settings used by the server."""
+    global AUTH_CONFIG_PATH, AUTH_MODE, REFERENCE_LIB_APP_ID, REFERENCE_LIB_SECRET, REFERENCE_LIB_BASE_URL
+    global PUBLIC_BASE_URL, REFERENCE_LIB_SCOPE, REFERENCE_LIB_ROLE, AUTH_SESSION_TTL
+    global LIBRARY_ENABLED, LIBRARY_UPLOAD_ROOT_ID, LIBRARY_PUBLISH_REQUIRE_RATING
+    global LIBRARY_ALLOW_ADMIN_PUBLISH, LIBRARY_MAX_VIDEO_MB, LIBRARY_MAX_MOTION_MB, LIBRARY_MAX_PREVIEW_MB
+    global NOTIFY_ENABLED, NOTIFY_APP_ID, NOTIFY_SECRET, NOTIFY_BASE_URL, NOTIFY_SENDER, NOTIFY_ORG
+    global NOTIFY_RECEIVER_FIELD
+    AUTH_CONFIG_PATH = path or AUTH_CONFIG_PATH
+    config = load_auth_config(AUTH_CONFIG_PATH)
+    AUTH_MODE = str(mode_override or config.get("mode") or "local").strip().lower()
+    REFERENCE_LIB_APP_ID = str(config.get("app_id") or "").strip()
+    REFERENCE_LIB_SECRET = str(config.get("secret") or "").strip()
+    REFERENCE_LIB_BASE_URL = str(config.get("base_url") or DEFAULT_REFERENCE_LIB_BASE_URL).strip().rstrip("/")
+    PUBLIC_BASE_URL = str(config.get("public_base_url") or "").strip().rstrip("/")
+    REFERENCE_LIB_SCOPE = str(config.get("scope") or "reference_lib:read").strip()
+    REFERENCE_LIB_ROLE = str(config.get("role") or "anims_public").strip()
+    try:
+        AUTH_SESSION_TTL = max(300, int(config.get("session_ttl") or 7 * 24 * 60 * 60))
+    except (TypeError, ValueError):
+        AUTH_SESSION_TTL = 7 * 24 * 60 * 60
+    LIBRARY_ENABLED = _config_flag(config.get("library_enabled"), True)
+    try:
+        LIBRARY_UPLOAD_ROOT_ID = max(0, int(config.get("upload_root_id") or 0))
+    except (TypeError, ValueError):
+        LIBRARY_UPLOAD_ROOT_ID = 0
+    LIBRARY_PUBLISH_REQUIRE_RATING = _config_flag(config.get("publish_require_rating"), True)
+    LIBRARY_ALLOW_ADMIN_PUBLISH = _config_flag(config.get("allow_admin_publish"), False)
+    for name, default, floor in (("LIBRARY_MAX_VIDEO_MB", 512, 1), ("LIBRARY_MAX_MOTION_MB", 128, 1),
+                                 ("LIBRARY_MAX_PREVIEW_MB", 8, 1)):
+        try:
+            value = int(config.get(name.lower()) or default)
+        except (TypeError, ValueError):
+            value = default
+        globals()[name] = max(floor, value)
+    notify = config.get("notify") if isinstance(config.get("notify"), dict) else {}
+    NOTIFY_APP_ID = str(notify.get("app_id") or "").strip()
+    NOTIFY_SECRET = str(notify.get("secret") or "").strip()
+    NOTIFY_BASE_URL = str(notify.get("base_url") or NOTIFY_BASE_URL).strip().rstrip("/")
+    NOTIFY_SENDER = str(notify.get("sender") or "").strip()
+    NOTIFY_ORG = str(notify.get("org") or "ND").strip()
+    NOTIFY_RECEIVER_FIELD = str(notify.get("receiver_field") or "code").strip()
+    NOTIFY_ENABLED = bool(_config_flag(notify.get("enabled"), True) and NOTIFY_APP_ID and NOTIFY_SECRET)
+
+
+apply_auth_config()
+ACCOUNTS = {}             # owner_id "rl:<id>" -> platform profile snapshot (accounts.json)
+ACCOUNTS_LOCK = threading.Lock()
+AUTH_SESSIONS = {}        # sid -> access/refresh tokens and owner (auth_sessions.json)
+AUTH_SESSIONS_LOCK = threading.Lock()
+AUTH_SESSIONS_SAVED_AT = 0.0
+AUTH_STATES = {}          # state -> {created, next, bind}; 5-minute one-time login states
+AUTH_STATES_LOCK = threading.Lock()
+AUTH_LOGIN_HITS = {}      # ip -> [timestamps] for login/callback rate limiting
+AUTH_LOGIN_LOCK = threading.Lock()
 QUEUE_SEQ = 0
 QUEUE_SEQ_LOCK = threading.Lock()
 QUEUE_LIMIT_OWNER = 20
 QUEUE_LIMIT_TOTAL = 200
-RATING_TAGS = ("quality", "hands", "physics", "camera", "clothing", "other")
 RATINGS_LOCK = threading.Lock()
+
+# Public reference library (browse / publish). See docs/reference-lib-resource-library-plan.md.
+LIBRARY_CACHE = {}            # cache key -> (expires_at, payload)
+LIBRARY_CACHE_LOCK = threading.Lock()
+LIBRARY_CACHE_TTL = 300
+LIBRARY_PUBLISH = {}          # job_id -> publish record (library_publish.json)
+LIBRARY_PUBLISH_LOCK = threading.Lock()
+LIBRARY_PUBLISH_ACTIVE = set()  # job ids with an in-process publish worker
+LIBRARY_MOTION_FORMATS = ("fbx", "vrma", "vmd")
 
 # Admin console (docs/user-isolation-plan.md §7). Off unless a key is supplied.
 ADMIN_COOKIE = "flowhmr_admin"
@@ -980,6 +1096,7 @@ def worker_loop():
                             stage["status"] = "cancelled"
                     job.update(status="cancelled", message="Stopped by user", loading_models=False, finished=time.time())
                     _persist_job_locked(job)
+                    notify_job_outcome(dict(job))
         except Exception as e:
             with JOBS_LOCK:
                 job = JOBS.get(job_id)
@@ -1009,6 +1126,7 @@ def worker_loop():
                            error_params={} if cancelled else params,
                            message="Stopped by user" if cancelled else "Failed", loading_models=False, finished=time.time())
                 _persist_job_locked(job)
+                notify_job_outcome(dict(job))
             if not cancelled:
                 traceback.print_exc()
         finally:
@@ -1663,6 +1781,7 @@ def run_job(job_id):
         job.update(status="done", progress=100, message="Done", finished=now,
                    num_frames=meta["num_frames"], has_fbx=has_fbx, camera=camera, correction=correction)
         _persist_job_locked(job)
+        notify_job_outcome(dict(job))
 
 
 # --------------------------------------------------------------------------- person thumbnails
@@ -1950,7 +2069,714 @@ def user_name(uid):
 
 
 def owner_display_name(owner_id):
-    return "MCP" if owner_id == MCP_OWNER else user_name(owner_id)
+    if owner_id == MCP_OWNER:
+        return "MCP"
+    if isinstance(owner_id, str) and RL_OWNER_PATTERN.fullmatch(owner_id):
+        with ACCOUNTS_LOCK:
+            record = ACCOUNTS.get(owner_id)
+        if record:
+            return record.get("name") or record.get("code") or owner_id
+        return owner_id
+    return user_name(owner_id)
+
+
+# --------------------------------------------------------------------------- reference library login
+class ReferenceLibError(Exception):
+    def __init__(self, code, message="", status=0):
+        super().__init__(message or code)
+        self.code = code
+        self.message = message or code
+        self.status = status
+
+
+def accounts_path():
+    work_dir = getattr(ARGS, "work_dir", None)
+    return os.path.join(work_dir, "accounts.json") if work_dir else None
+
+
+def _normalize_account(owner_id, saved):
+    match = RL_OWNER_PATTERN.fullmatch(owner_id)
+    try:
+        user_id = int(match.group(1)) if match else int(saved.get("id") or 0)
+    except (TypeError, ValueError):
+        user_id = 0
+    roles = [str(role) for role in saved.get("roles") or [] if isinstance(role, (str, int))]
+    code = saved.get("code") if isinstance(saved.get("code"), str) else ""
+    name = saved.get("name") if isinstance(saved.get("name"), str) else ""
+    return {"id": user_id, "code": code, "name": name or code or owner_id,
+            "roles": roles, "scope": str(saved.get("scope") or ""),
+            "created": float(saved.get("created") or time.time()),
+            "last_login": float(saved.get("last_login") or 0.0),
+            "last_ip": str(saved.get("last_ip") or ""),
+            "disabled": bool(saved.get("disabled", False))}
+
+
+def load_accounts():
+    path = accounts_path()
+    if path is None:
+        return
+    try:
+        with open(path, encoding="utf-8") as stream:
+            saved = json.load(stream)
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError):
+        app.logger.warning("Could not read %s", path, exc_info=True)
+        return
+    if not isinstance(saved, dict):
+        return
+    with ACCOUNTS_LOCK:
+        for owner_id, record in saved.items():
+            if isinstance(owner_id, str) and RL_OWNER_PATTERN.fullmatch(owner_id) and isinstance(record, dict):
+                ACCOUNTS[owner_id] = _normalize_account(owner_id, record)
+
+
+def save_accounts_locked():
+    path = accounts_path()
+    if path is None:
+        return
+    temp = path + ".tmp"
+    try:
+        with open(temp, "w", encoding="utf-8") as stream:
+            json.dump(ACCOUNTS, stream, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    except OSError:
+        app.logger.warning("Could not write %s", path, exc_info=True)
+
+
+def account_record(owner_id):
+    with ACCOUNTS_LOCK:
+        record = ACCOUNTS.get(owner_id)
+        return copy.deepcopy(record) if record else None
+
+
+def account_has_role(owner_id, role=REFERENCE_LIB_ROLE):
+    record = account_record(owner_id)
+    return bool(record and role in record.get("roles", []))
+
+
+def store_account(owner_id, info, scope, ip=None, login=False):
+    now = time.time()
+    with ACCOUNTS_LOCK:
+        record = ACCOUNTS.get(owner_id)
+        if record is None:
+            record = ACCOUNTS[owner_id] = _normalize_account(owner_id, {"created": now})
+        record["code"] = info.get("code") or record.get("code") or ""
+        record["name"] = info.get("name") or info.get("code") or record.get("name") or owner_id
+        record["roles"] = list(info.get("roles") or [])
+        if scope:
+            record["scope"] = scope
+        if login:
+            record["last_login"] = now
+            if ip:
+                record["last_ip"] = ip
+        save_accounts_locked()
+        return copy.deepcopy(record)
+
+
+def auth_sessions_path():
+    work_dir = getattr(ARGS, "work_dir", None)
+    return os.path.join(work_dir, "auth_sessions.json") if work_dir else None
+
+
+def _normalize_session(saved):
+    if not isinstance(saved, dict):
+        return None
+    owner_id = saved.get("owner_id")
+    if not isinstance(owner_id, str) or not RL_OWNER_PATTERN.fullmatch(owner_id):
+        return None
+    access = saved.get("access_token")
+    refresh = saved.get("refresh_token")
+    if not isinstance(access, str) or not isinstance(refresh, str) or not refresh:
+        return None
+    return {"owner_id": owner_id, "created": float(saved.get("created") or time.time()),
+            "last_seen": float(saved.get("last_seen") or 0.0),
+            "access_token": access, "access_expires_at": float(saved.get("access_expires_at") or 0.0),
+            "refresh_token": refresh, "scope": str(saved.get("scope") or "")}
+
+
+def load_auth_sessions():
+    global AUTH_SESSIONS_SAVED_AT
+    path = auth_sessions_path()
+    if path is None:
+        return
+    try:
+        with open(path, encoding="utf-8") as stream:
+            saved = json.load(stream)
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError):
+        app.logger.warning("Could not read %s", path, exc_info=True)
+        return
+    if not isinstance(saved, dict):
+        return
+    now = time.time()
+    with AUTH_SESSIONS_LOCK:
+        for sid, record in saved.items():
+            if not isinstance(sid, str) or not AUTH_SESSION_COOKIE_PATTERN.fullmatch(sid):
+                continue
+            normalized = _normalize_session(record)
+            if normalized and now - normalized["created"] <= AUTH_SESSION_TTL:
+                AUTH_SESSIONS[sid] = normalized
+        AUTH_SESSIONS_SAVED_AT = now
+    save_auth_sessions_locked()
+
+
+def save_auth_sessions_locked():
+    global AUTH_SESSIONS_SAVED_AT
+    path = auth_sessions_path()
+    if path is None:
+        AUTH_SESSIONS_SAVED_AT = time.time()
+        return
+    temp = path + ".tmp"
+    try:
+        with open(temp, "w", encoding="utf-8") as stream:
+            json.dump(AUTH_SESSIONS, stream, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    except OSError:
+        app.logger.warning("Could not write %s", path, exc_info=True)
+    AUTH_SESSIONS_SAVED_AT = time.time()
+
+
+def create_auth_session(owner_id, token, ip=None):
+    now = time.time()
+    sid = uuid.uuid4().hex + uuid.uuid4().hex
+    record = {"owner_id": owner_id, "created": now, "last_seen": now,
+              "access_token": token["access"], "access_expires_at": token["expires_at"],
+              "refresh_token": token["refresh"], "scope": token.get("scope") or ""}
+    with AUTH_SESSIONS_LOCK:
+        AUTH_SESSIONS[sid] = record
+        save_auth_sessions_locked()
+    return sid
+
+
+def destroy_auth_session(sid):
+    if not sid:
+        return None
+    with AUTH_SESSIONS_LOCK:
+        record = AUTH_SESSIONS.pop(sid, None)
+        if record is not None:
+            save_auth_sessions_locked()
+    return record
+
+
+def destroy_owner_sessions(owner_id):
+    with AUTH_SESSIONS_LOCK:
+        removed = [sid for sid, record in AUTH_SESSIONS.items() if record.get("owner_id") == owner_id]
+        for sid in removed:
+            AUTH_SESSIONS.pop(sid, None)
+        if removed:
+            save_auth_sessions_locked()
+    return removed
+
+
+def refresh_auth_session(sid, record):
+    refresh = record.get("refresh_token")
+    if not refresh:
+        destroy_auth_session(sid)
+        return False
+    try:
+        token = reference_lib_refresh(refresh)
+    except ReferenceLibError as error:
+        if error.status in (400, 401):
+            destroy_auth_session(sid)
+            return False
+        app.logger.warning("Could not refresh reference library token (%s)", error.code)
+        return True
+    with AUTH_SESSIONS_LOCK:
+        current = AUTH_SESSIONS.get(sid)
+        if current is None:
+            return False
+        current.update({"access_token": token["access"], "access_expires_at": token["expires_at"],
+                        "refresh_token": token["refresh"] or current.get("refresh_token"),
+                        "scope": token.get("scope") or current.get("scope") or ""})
+        save_auth_sessions_locked()
+    record.update({"access_token": token["access"], "access_expires_at": token["expires_at"],
+                   "refresh_token": token["refresh"] or record.get("refresh_token")})
+    return True
+
+
+_SESSION_UNSET = object()
+
+
+def auth_session():
+    """Current logged-in platform session, or None. Refreshes tokens just before they expire."""
+    cached = getattr(g, "_auth_session", _SESSION_UNSET)
+    if cached is not _SESSION_UNSET:
+        return cached
+    g._auth_session = None
+    g._auth_session_id = None
+    sid = request.cookies.get(AUTH_COOKIE, "")
+    if not AUTH_SESSION_COOKIE_PATTERN.fullmatch(sid):
+        return None
+    with AUTH_SESSIONS_LOCK:
+        stored = AUTH_SESSIONS.get(sid)
+        record = dict(stored) if stored else None
+    if record is None:
+        return None
+    if time.time() - record["created"] > AUTH_SESSION_TTL:
+        destroy_auth_session(sid)
+        return None
+    if record.get("access_expires_at", 0.0) - time.time() <= AUTH_REFRESH_MARGIN:
+        if not refresh_auth_session(sid, record):
+            return None
+    now = time.time()
+    with AUTH_SESSIONS_LOCK:
+        stored = AUTH_SESSIONS.get(sid)
+        if stored is None:
+            return None
+        stored["last_seen"] = now
+        if now - AUTH_SESSIONS_SAVED_AT >= 60:
+            save_auth_sessions_locked()
+        record = dict(stored)
+    g._auth_session = record
+    g._auth_session_id = sid
+    return record
+
+
+def auth_redirect_uri():
+    return f"{PUBLIC_BASE_URL}/api/auth/callback"
+
+
+def _reference_lib_sign_path(endpoint):
+    prefix = urlsplit(REFERENCE_LIB_BASE_URL).path.rstrip("/")
+    if prefix.startswith("/api"):
+        prefix = prefix[4:]
+    return f"{prefix}/{endpoint.lstrip('/')}"
+
+
+def _reference_lib_error_code(raw):
+    try:
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+    except (ValueError, UnicodeDecodeError):
+        return "upstream_error"
+    if not isinstance(payload, dict):
+        return "upstream_error"
+    for key in ("error_code", "error", "code"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    detail = payload.get("detail")
+    if isinstance(detail, dict) and isinstance(detail.get("code"), str):
+        return detail["code"]
+    return "upstream_error"
+
+
+def _reference_lib_unwrap(payload):
+    if isinstance(payload, dict):
+        for key in ("data", "result"):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                return value
+    return payload if isinstance(payload, dict) else {}
+
+
+def reference_lib_request(method, endpoint, payload=None, bearer=None):
+    """Signed application call to the reference library API (HMAC-SHA256 + nonce)."""
+    if not REFERENCE_LIB_SECRET:
+        raise ReferenceLibError("auth_disabled", "Reference library secret is not configured.", 503)
+    url = f"{REFERENCE_LIB_BASE_URL}/{endpoint.lstrip('/')}"
+    sign_path = _reference_lib_sign_path(endpoint)
+    body = b"" if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    last_error = None
+    for attempt in range(2):
+        nonce = uuid.uuid4().hex
+        stamp = str(int(time.time()))
+        message = "\n".join([REFERENCE_LIB_APP_ID, stamp, nonce, method.upper(), sign_path,
+                             hashlib.sha256(body).hexdigest()])
+        headers = {
+            "X-App-Id": REFERENCE_LIB_APP_ID, "X-Timestamp": stamp, "X-Nonce": nonce,
+            "X-Signature": hmac.new(REFERENCE_LIB_SECRET.encode("utf-8"), message.encode("utf-8"),
+                                    hashlib.sha256).hexdigest(),
+            "Accept": "application/json",
+        }
+        if body:
+            headers["Content-Type"] = "application/json"
+        if bearer:
+            headers["Authorization"] = f"Bearer {bearer}"
+        req = urllib.request.Request(url, data=body if method.upper() != "GET" else None,
+                                     headers=headers, method=method.upper())
+        try:
+            with urllib.request.urlopen(req, timeout=15) as response:
+                raw = response.read()
+        except urllib.error.HTTPError as error:
+            raw = error.read()
+            code = _reference_lib_error_code(raw)
+            if error.code == 409 and code in ("duplicate_nonce", "nonce_reused") and attempt == 0:
+                continue
+            raise ReferenceLibError(code, f"Reference library rejected the request ({code}).", error.code)
+        except (urllib.error.URLError, OSError, TimeoutError) as error:
+            last_error = error
+            break
+        try:
+            return json.loads(raw.decode("utf-8")) if raw else {}
+        except (ValueError, UnicodeDecodeError):
+            raise ReferenceLibError("auth_upstream_unavailable", "Reference library returned invalid JSON.", 503)
+    app.logger.warning("Reference library request failed: %s", last_error)
+    raise ReferenceLibError("auth_upstream_unavailable", "Reference library is unavailable.", 503)
+
+
+def _reference_token(payload):
+    data = _reference_lib_unwrap(payload)
+    access = data.get("access_token") or data.get("accessToken")
+    if not isinstance(access, str) or not access:
+        raise ReferenceLibError("auth_upstream_unavailable", "Token response did not include access_token.", 503)
+    try:
+        expires_in = int(data.get("expires_in") or 3600)
+    except (TypeError, ValueError):
+        expires_in = 3600
+    refresh = data.get("refresh_token")
+    scope = data.get("scope")
+    return {"access": access, "refresh": refresh if isinstance(refresh, str) else "",
+            "scope": scope if isinstance(scope, str) else "",
+            "expires_at": time.time() + max(60, expires_in)}
+
+
+def reference_lib_exchange(code, redirect_uri):
+    return _reference_token(reference_lib_request(
+        "POST", "token", {"grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri}))
+
+
+def reference_lib_refresh(refresh_token):
+    return _reference_token(reference_lib_request(
+        "POST", "token/refresh", {"grant_type": "refresh_token", "refresh_token": refresh_token}))
+
+
+def reference_lib_revoke(token, hint="access_token"):
+    try:
+        reference_lib_request("POST", "token/revoke", {"token": token, "token_type_hint": hint})
+    except ReferenceLibError as error:
+        app.logger.info("Reference library revoke failed (%s)", error.code)
+
+
+def reference_lib_user_info(access_token):
+    payload = reference_lib_request("GET", "user/info", bearer=access_token)
+    data = _reference_lib_unwrap(payload)
+    user = data.get("user") if isinstance(data.get("user"), dict) else {}
+    raw_id = user.get("id", data.get("id"))
+    if isinstance(raw_id, str) and raw_id.isdigit():
+        raw_id = int(raw_id)
+    if type(raw_id) is not int:
+        raise ReferenceLibError("auth_upstream_unavailable", "User response did not include an id.", 503)
+    roles = user.get("roles") or data.get("roles") or []
+    if not isinstance(roles, list):
+        roles = []
+    scope = data.get("scope") or user.get("scope") or ""
+    if isinstance(scope, list):
+        scope = " ".join(str(item) for item in scope)
+    return {"id": raw_id,
+            "code": str(user.get("code") or user.get("username")
+                        or data.get("code") or data.get("username") or ""),
+            "name": str(user.get("name") or user.get("nickname")
+                        or data.get("name") or data.get("nickname") or ""),
+            "roles": [str(role) for role in roles], "scope": scope if isinstance(scope, str) else ""}
+
+
+# --------------------------------------------------------------------------- reference library resources
+LIBRARY_SCOPE_WRITE = "reference_lib:write"
+
+
+def required_reference_scopes():
+    return [scope for scope in REFERENCE_LIB_SCOPE.split() if scope]
+
+
+def reference_lib_user_request(method, endpoint, access_token, payload=None, timeout=30):
+    """User-level call to the reference library API (Bearer only, no app signature)."""
+    url = f"{REFERENCE_LIB_BASE_URL}/{endpoint.lstrip('/')}"
+    body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=body if method.upper() != "GET" else None,
+                                 headers=headers, method=method.upper())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as error:
+        raw = error.read()
+        code = _reference_lib_error_code(raw)
+        raise ReferenceLibError(code, f"Reference library rejected the request ({code}).", error.code)
+    except (urllib.error.URLError, OSError, TimeoutError) as error:
+        app.logger.warning("Reference library user request failed: %s", error)
+        raise ReferenceLibError("library_unavailable", "Reference library is unavailable.", 503)
+    try:
+        result = json.loads(raw.decode("utf-8")) if raw else {}
+    except (ValueError, UnicodeDecodeError):
+        raise ReferenceLibError("library_unavailable", "Reference library returned invalid JSON.", 502)
+    return result if isinstance(result, dict) else {}
+
+
+def reference_lib_upload(endpoint, access_token, fields, files, timeout=600):
+    """Streaming multipart upload (user-level Bearer). files: [(field, filename, mime, path)]."""
+    boundary = "----FlowHMR" + uuid.uuid4().hex
+    # Text parts and file parts must stay interleaved: each file's header is
+    # followed by its bytes, otherwise the server reads an empty body.
+    parts = []
+    total = 0
+    for name, value in fields.items():
+        if value is None:
+            continue
+        chunk = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n"
+                 f"{value}\r\n").encode("utf-8")
+        parts.append(chunk)
+        total += len(chunk)
+    for field_name, filename, content_type, path in files:
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            raise ReferenceLibError("library_file_missing", f"Missing upload file: {path}", 400)
+        chunk = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{field_name}\"; "
+                 f"filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n").encode("utf-8")
+        parts.append(chunk)
+        parts.append((path, size))
+        total += len(chunk) + size + 2
+    tail = f"--{boundary}--\r\n".encode("utf-8")
+    total += len(tail)
+
+    segments = parts
+    parts = urlsplit(REFERENCE_LIB_BASE_URL)
+    prefix = parts.path.rstrip("/")
+    target = f"{prefix}/{endpoint.lstrip('/')}"
+    if parts.query:
+        target = f"{target}?{parts.query}"
+    secure = parts.scheme == "https"
+    port = parts.port or (443 if secure else 80)
+    connection = None
+    status = 0
+    raw = b""
+    try:
+        if secure:
+            connection = http.client.HTTPSConnection(parts.hostname, port, timeout=10,
+                                                      context=ssl.create_default_context())
+        else:
+            connection = http.client.HTTPConnection(parts.hostname, port, timeout=10)
+        connection.connect()
+        connection.sock.settimeout(timeout)
+        connection.putrequest("POST", target, skip_accept_encoding=True)
+        connection.putheader("Authorization", f"Bearer {access_token}")
+        connection.putheader("Accept", "application/json")
+        connection.putheader("Content-Type", f"multipart/form-data; boundary={boundary}")
+        connection.putheader("Content-Length", str(total))
+        connection.endheaders()
+        for part in segments:
+            if isinstance(part, tuple):
+                path, _ = part
+                with open(path, "rb") as handle:
+                    while True:
+                        block = handle.read(1024 * 1024)
+                        if not block:
+                            break
+                        connection.send(block)
+                connection.send(b"\r\n")
+            else:
+                connection.send(part)
+        connection.send(tail)
+        response = connection.getresponse()
+        status = response.status
+        raw = response.read()
+    except OSError as error:
+        app.logger.warning("Reference library upload failed: %s", error)
+        raise ReferenceLibError("library_unavailable", "Reference library is unavailable.", 503)
+    except http.client.HTTPException as error:
+        app.logger.warning("Reference library upload protocol error: %s", error)
+        raise ReferenceLibError("library_unavailable", "Reference library connection failed.", 503)
+    finally:
+        if connection is not None:
+            connection.close()
+
+    if status >= 400:
+        code = _reference_lib_error_code(raw)
+        detail = raw.decode("utf-8", "replace")[:300]
+        app.logger.warning("Reference library upload rejected (%s): %s", status, detail)
+        raise ReferenceLibError(code, f"Reference library rejected the upload ({code}).", status)
+    try:
+        result = json.loads(raw.decode("utf-8")) if raw else {}
+    except (ValueError, UnicodeDecodeError):
+        raise ReferenceLibError("library_unavailable", "Reference library returned invalid JSON.", 502)
+    return result if isinstance(result, dict) else {}
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler)
+
+
+def reference_lib_download_location(resource_id, kind, access_token):
+    """Ask the upstream download endpoint for its 302 target without following it."""
+    endpoint = f"resources/{resource_id}/download?{urlencode({'kind': kind})}"
+    url = f"{REFERENCE_LIB_BASE_URL}/{endpoint}"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {access_token}",
+                                               "Accept": "application/json"}, method="GET")
+    try:
+        with _NO_REDIRECT_OPENER.open(req, timeout=15) as response:
+            location = response.headers.get("Location")
+    except urllib.error.HTTPError as error:
+        if error.code in (301, 302, 303, 307, 308):
+            location = error.headers.get("Location")
+        else:
+            raw = error.read()
+            code = _reference_lib_error_code(raw)
+            raise ReferenceLibError(code, f"Reference library rejected the download ({code}).", error.code)
+    except (urllib.error.URLError, OSError, TimeoutError) as error:
+        app.logger.warning("Reference library download failed: %s", error)
+        raise ReferenceLibError("library_unavailable", "Reference library is unavailable.", 503)
+    if not isinstance(location, str) or not location:
+        raise ReferenceLibError("library_unavailable", "Download link was not returned.", 502)
+    return location
+
+
+def library_cache_get(key):
+    now = time.time()
+    with LIBRARY_CACHE_LOCK:
+        item = LIBRARY_CACHE.get(key)
+        if item is None:
+            return None
+        if item[0] <= now:
+            LIBRARY_CACHE.pop(key, None)
+            return None
+        return copy.deepcopy(item[1])
+
+
+def library_cache_put(key, payload, ttl=LIBRARY_CACHE_TTL):
+    with LIBRARY_CACHE_LOCK:
+        LIBRARY_CACHE[key] = (time.time() + ttl, copy.deepcopy(payload))
+        if len(LIBRARY_CACHE) > 256:
+            for stale in sorted(LIBRARY_CACHE, key=lambda item: LIBRARY_CACHE[item][0])[:64]:
+                LIBRARY_CACHE.pop(stale, None)
+
+
+def owner_session_record(owner_id, require_scope=None):
+    """Newest usable session for owner_id -> (sid, record, reason)."""
+    now = time.time()
+    with AUTH_SESSIONS_LOCK:
+        candidates = [(sid, dict(record)) for sid, record in AUTH_SESSIONS.items()
+                      if record.get("owner_id") == owner_id]
+    candidates.sort(key=lambda item: item[1].get("last_seen") or item[1].get("created") or 0, reverse=True)
+    scope_missing = False
+    for sid, record in candidates:
+        if now - record.get("created", 0) > AUTH_SESSION_TTL:
+            destroy_auth_session(sid)
+            continue
+        if record.get("access_expires_at", 0) - now <= AUTH_REFRESH_MARGIN and not refresh_auth_session(sid, record):
+            continue
+        with AUTH_SESSIONS_LOCK:
+            stored = AUTH_SESSIONS.get(sid)
+            record = dict(stored) if stored else None
+        if record is None:
+            continue
+        if require_scope and require_scope not in (record.get("scope") or "").split():
+            scope_missing = True
+            continue
+        return sid, record, None
+    return None, None, "library_owner_scope_missing" if scope_missing else "library_owner_session_missing"
+
+
+def owner_has_write(owner_id):
+    _, _, reason = owner_session_record(owner_id, LIBRARY_SCOPE_WRITE)
+    return reason is None
+
+
+def library_publish_path():
+    work_dir = getattr(ARGS, "work_dir", None)
+    return os.path.join(work_dir, "library_publish.json") if work_dir else None
+
+
+def save_library_publish_locked():
+    path = library_publish_path()
+    if not path:
+        return
+    try:
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(LIBRARY_PUBLISH, handle, ensure_ascii=False, indent=1)
+        os.replace(tmp, path)
+    except OSError:
+        app.logger.warning("Could not save %s", path, exc_info=True)
+
+
+def load_library_publish():
+    path = library_publish_path()
+    if not path or not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError) as error:
+        app.logger.warning("Ignored %s: %s", path, error)
+        return
+    if not isinstance(data, dict):
+        return
+    with LIBRARY_PUBLISH_LOCK:
+        for job_id, record in data.items():
+            if isinstance(job_id, str) and isinstance(record, dict):
+                if record.get("state") in ("queued", "uploading", "uploaded_video", "uploading_motion"):
+                    record = dict(record, state="failed", error="interrupted",
+                                  error_code="library_publish_interrupted", updated=time.time())
+                LIBRARY_PUBLISH[job_id] = record
+        save_library_publish_locked()
+
+
+def library_publish_get(job_id):
+    with LIBRARY_PUBLISH_LOCK:
+        record = LIBRARY_PUBLISH.get(job_id)
+        return copy.deepcopy(record) if record else None
+
+
+def public_publish_record(record):
+    keys = ("job_id", "owner_id", "owner_name", "published_by", "state", "step", "resource_id",
+            "video_resource_id", "motion_resource_id", "motion_format", "name", "description",
+            "rating", "tags", "error", "error_code", "created", "updated", "finished")
+    return {key: copy.deepcopy(record.get(key)) for key in keys if key in record}
+
+
+def safe_next_url(value):
+    if not isinstance(value, str) or not value.startswith("/") or value.startswith("//") or "\\" in value:
+        return "/"
+    return value if not any(ord(ch) < 32 for ch in value) else "/"
+
+
+def auth_rate_limited(ip, limit=10):
+    now = time.time()
+    with AUTH_LOGIN_LOCK:
+        hits = [stamp for stamp in AUTH_LOGIN_HITS.get(ip, []) if now - stamp < 60]
+        allowed = len(hits) < limit
+        if allowed:
+            hits.append(now)
+        AUTH_LOGIN_HITS[ip] = hits
+        if len(AUTH_LOGIN_HITS) > 4096:
+            AUTH_LOGIN_HITS.clear()
+    return not allowed
+
+
+def auth_role_watch(interval=600):
+    """Refresh platform roles/names for active sessions so revoked roles are enforced."""
+    while True:
+        time.sleep(interval)
+        with AUTH_SESSIONS_LOCK:
+            sessions = [(sid, dict(record)) for sid, record in AUTH_SESSIONS.items()]
+        infos = {}
+        for sid, record in sessions:
+            if record.get("access_expires_at", 0.0) - time.time() <= AUTH_REFRESH_MARGIN:
+                if not refresh_auth_session(sid, record):
+                    continue
+            owner_id = record["owner_id"]
+            if owner_id not in infos:
+                try:
+                    infos[owner_id] = reference_lib_user_info(record["access_token"])
+                except ReferenceLibError as error:
+                    app.logger.info("Reference library role check failed for %s (%s)", owner_id, error.code)
+                    infos[owner_id] = None
+            info = infos[owner_id]
+            if info:
+                store_account(owner_id, info, info.get("scope") or record.get("scope"))
+
 
 
 # --------------------------------------------------------------------------- admin
@@ -2083,9 +2909,9 @@ def audit_path():
     return os.path.join(work_dir, "admin_audit.jsonl") if work_dir else None
 
 
-def audit_admin(action, target=None, result="ok", detail=None):
+def audit_admin(action, target=None, result="ok", detail=None, actor="admin"):
     """Append one admin write operation (including failures) to admin_audit.jsonl."""
-    payload = {"ts": time.time(), "actor": "admin", "target": target, "action": action,
+    payload = {"ts": time.time(), "actor": actor, "target": target, "action": action,
                "result": result, "ip": client_ip()}
     if detail:
         payload["detail"] = str(detail)[:500]
@@ -2109,6 +2935,9 @@ def audit_admin(action, target=None, result="ok", detail=None):
 
 
 def user_disabled(uid):
+    if isinstance(uid, str) and RL_OWNER_PATTERN.fullmatch(uid):
+        with ACCOUNTS_LOCK:
+            return bool((ACCOUNTS.get(uid) or {}).get("disabled"))
     with USERS_LOCK:
         return bool((USERS.get(uid) or {}).get("disabled"))
 
@@ -2208,15 +3037,27 @@ def current_user_id():
     uid = getattr(g, "user_id", None)
     if uid:
         return uid
+    session = auth_session()
+    if session:
+        uid = session["owner_id"]
+        g.user_id = uid
+        return uid
     cookie = request.cookies.get(USER_COOKIE, "")
     if USER_UID_PATTERN.fullmatch(cookie):
         uid = cookie
     else:
-        uid = ip_fallback_user(client_ip()) or uuid.uuid4().hex
+        fallback = ip_fallback_user(client_ip()) if AUTH_MODE == "local" else None
+        uid = fallback or uuid.uuid4().hex
         g.issue_user_cookie = True
     g.user_id = uid
     touch_user(uid, client_ip())
     return uid
+
+
+def mcp_service_request():
+    key = request.headers.get(SERVICE_KEY_HEADER, "")
+    return bool(key and key.isascii() and local_model_request()
+                and hmac.compare_digest(key, MCP_SERVICE.service_key))
 
 
 def request_identity():
@@ -2224,9 +3065,7 @@ def request_identity():
     identity = getattr(g, "identity", None)
     if identity:
         return identity
-    key = request.headers.get(SERVICE_KEY_HEADER, "")
-    if (key and key.isascii() and local_model_request()
-            and hmac.compare_digest(key, MCP_SERVICE.service_key)):
+    if mcp_service_request():
         identity = MCP_OWNER
     else:
         identity = current_user_id()
@@ -2237,6 +3076,138 @@ def request_identity():
 def job_owner(job):
     owner = job.get("owner_id")
     return owner if isinstance(owner, str) and owner else LEGACY_OWNER
+
+
+# --------------------------------------------------------------------------- 99U notifications
+def notify_receiver(job):
+    """99U receiver = the login name of the job owner (see docs/99u-notify.md)."""
+    owner = job_owner(job)
+    if not isinstance(owner, str) or not RL_OWNER_PATTERN.fullmatch(owner):
+        return ""
+    with ACCOUNTS_LOCK:
+        record = ACCOUNTS.get(owner)
+    if isinstance(record, dict):
+        for field in (NOTIFY_RECEIVER_FIELD, "id"):
+            value = record.get(field)
+            if value not in (None, ""):
+                return str(value).strip()
+    return owner[3:]
+
+
+def notify_safe_text(text):
+    """Flatten header-looking lines and cap the payload at 99U's 4000-character limit."""
+    lines = str(text).replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    lines = [f" {line}" if line.lower().startswith(NOTIFY_HEADER_PREFIXES) else line for line in lines]
+    return "\n".join(lines)[:4000]
+
+
+def notify_text(job, status):
+    name = str(job.get("filename") or job.get("id") or "")
+    started = job.get("started") or job.get("created") or 0
+    finished = job.get("finished") or time.time()
+    try:
+        seconds = max(0, int(float(finished) - float(started)))
+    except (TypeError, ValueError):
+        seconds = 0
+    duration = f"{seconds // 60} 分 {seconds % 60} 秒" if seconds >= 60 else f"{seconds} 秒"
+    label = {"done": "已完成", "failed": "失败", "cancelled": "已取消"}[status]
+    lines = [f"【FlowHMR】任务「{name}」{label}，耗时 {duration}。"]
+    if status == "failed" and job.get("error"):
+        lines.append(f"原因：{str(job['error'])[:300]}")
+    if PUBLIC_BASE_URL:
+        lines.append(f"查看：{PUBLIC_BASE_URL}/?job={job.get('id')}")
+    return notify_safe_text("\n".join(lines))
+
+
+def notify_headers(method, path, body):
+    stamp = str(int(time.time()))
+    nonce = uuid.uuid4().hex
+    digest = hashlib.sha256(body or b"").hexdigest()
+    message = "\n".join([NOTIFY_APP_ID, stamp, nonce, method.upper(), path, digest])
+    signature = hmac.new(NOTIFY_SECRET.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).hexdigest()
+    return {"X-App-Id": NOTIFY_APP_ID, "X-Timestamp": stamp, "X-Nonce": nonce, "X-Signature": signature}
+
+
+def notify_sign_path(url):
+    """Sign the upstream path: nginx strips the /api prefix before the 99U service verifies it."""
+    path = urlsplit(url).path
+    return path[4:] if path.startswith("/api/") else path
+
+
+def notify_request(method, path, payload=None):
+    url = f"{NOTIFY_BASE_URL}{path}"
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else b""
+    headers = {"Accept": "application/json", **notify_headers(method, notify_sign_path(url), body)}
+    if body:
+        headers["Content-Type"] = "application/json"
+    request_obj = urllib.request.Request(url, data=body or None, headers=headers, method=method.upper())
+    try:
+        with urllib.request.urlopen(request_obj, timeout=15) as response:
+            return json.loads(response.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as error:
+        raw = error.read().decode("utf-8", "replace")
+        try:
+            detail = json.loads(raw)
+        except ValueError:
+            detail = {}
+        reason = detail.get("message") or detail.get("code") or raw[:200]
+        raise RuntimeError(f"HTTP {error.code} {detail.get('code') or ''}: {reason}".strip()) from error
+
+
+def notify_wait(job_id):
+    deadline = time.time() + NOTIFY_TIMEOUT
+    result = {"status": "timeout"}
+    while time.time() < deadline:
+        try:
+            result = notify_request("GET", f"/jobs/{job_id}")
+        except Exception as error:  # noqa: BLE001 - delivery is best effort
+            return {"status": "error", "error": str(error)}
+        if result.get("status") in ("success", "failed"):
+            return result
+        time.sleep(2.0)
+    return result
+
+
+def notify_worker(task_id, receiver, text):
+    payload = {"receiver": receiver, "text": text}
+    if NOTIFY_SENDER:
+        payload["sender"] = NOTIFY_SENDER
+    if NOTIFY_ORG:
+        payload["org"] = NOTIFY_ORG
+    try:
+        response = notify_request("POST", "/messages", payload)
+    except Exception as error:  # noqa: BLE001 - delivery is best effort
+        app.logger.warning("99U notify submit failed for %s: %s", task_id, error)
+        return
+    job_id = response.get("job_id") if isinstance(response, dict) else None
+    if not job_id:
+        app.logger.warning("99U notify rejected for %s: %s", task_id, response)
+        return
+    final = notify_wait(job_id)
+    if final.get("status") != "success":
+        app.logger.warning("99U notify %s for %s: %s", final.get("status"), task_id, final.get("error") or "")
+
+
+def notify_job_outcome(job):
+    """Send one 99U message per terminal job state; never blocks the queue."""
+    if not NOTIFY_ENABLED:
+        return
+    status = job.get("status")
+    if status not in ("done", "failed", "cancelled"):
+        return
+    batch = job.get("person_batch")
+    if batch and batch != job.get("id"):
+        return  # scene members are covered by the parent job
+    key = (job.get("id"), status, job.get("finished"))
+    with NOTIFY_LOCK:
+        if key in NOTIFY_SENT:
+            return
+        NOTIFY_SENT.add(key)
+    receiver = notify_receiver(job)
+    if not receiver:
+        return
+    text = notify_text(job, status)
+    threading.Thread(target=notify_worker, args=(job.get("id"), receiver, text), daemon=True).start()
 
 
 def local_browser_request():
@@ -2268,6 +3239,21 @@ def require_job_access(job):
 
 
 @app.before_request
+def guard_auth_mode():
+    """In reference mode every API call needs a platform session (or admin / MCP credentials)."""
+    if AUTH_MODE != "reference" or not request.path.startswith("/api/"):
+        return None
+    path = request.path
+    if path.startswith("/api/auth/") or path in ("/api/me", "/api/info"):
+        return None
+    if path.startswith("/api/desktop/") or path.startswith("/api/character-resource/"):
+        return None
+    if admin_session_valid() or mcp_service_request() or auth_session():
+        return None
+    return api_error("auth_required", "请先登录公共动作参考库账号。", 401)
+
+
+@app.before_request
 def guard_job_ownership():
     match = JOB_PATH_PATTERN.fullmatch(request.path)
     if match is None:
@@ -2291,10 +3277,27 @@ def attach_user_cookie(response):
     return response
 
 
+def _auth_profile():
+    session = auth_session()
+    if not session:
+        return None
+    record = account_record(session["owner_id"]) or {}
+    return {"mode": AUTH_MODE, "logged_in": True, "name_managed": True,
+            "user": {"id": record.get("id"), "code": record.get("code") or "",
+                     "name": record.get("name") or ""},
+            "roles": record.get("roles") or [],
+            "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                        time.gmtime(session.get("created", 0) + AUTH_SESSION_TTL))}
+
+
 @app.route("/api/me", methods=["GET", "PUT"])
 def api_me():
-    uid = current_user_id()
+    session = auth_session()
     if request.method == "PUT":
+        if session:
+            return api_error("name_managed", "昵称由公共动作参考库统一管理，无法在此修改。", 409)
+        if AUTH_MODE == "reference":
+            return api_error("auth_required", "请先登录公共动作参考库账号。", 401)
         body = request.get_json(silent=True)
         name = body.get("name") if isinstance(body, dict) else None
         if not isinstance(name, str):
@@ -2302,11 +3305,722 @@ def api_me():
         name = " ".join(name.split())[:24]
         if not name:
             return api_error("user_name_invalid", "昵称不能为空。", 400)
+        uid = current_user_id()
         with USERS_LOCK:
             USERS.setdefault(uid, _normalize_user(uid, {}))
             USERS[uid]["name"] = name
             save_users_locked()
-    return jsonify(uid=uid, name=user_name(uid), ip=client_ip(), local=local_model_request())
+    if session:
+        profile = _auth_profile()
+        return jsonify(uid=session["owner_id"], owner_id=session["owner_id"],
+                       name=owner_display_name(session["owner_id"]), ip=client_ip(),
+                       local=local_model_request(), auth=profile)
+    if AUTH_MODE == "reference":
+        return jsonify(uid=None, owner_id=None, name="", ip=client_ip(),
+                       local=local_model_request(),
+                       auth={"mode": AUTH_MODE, "logged_in": False, "name_managed": False})
+    uid = current_user_id()
+    return jsonify(uid=uid, name=user_name(uid), ip=client_ip(), local=local_model_request(),
+                   auth={"mode": AUTH_MODE, "logged_in": False, "name_managed": False})
+
+
+def _auth_failure(code):
+    return redirect(f"/?auth_error={code}")
+
+
+@app.get("/api/auth/config")
+def api_auth_config():
+    if AUTH_MODE == "local":
+        abort(404)
+    return jsonify(mode=AUTH_MODE, login_url="/api/auth/login", provider_name="公共动作参考库",
+                   logged_in=bool(auth_session()))
+
+
+@app.get("/api/auth/login")
+def api_auth_login():
+    if AUTH_MODE == "local":
+        abort(404)
+    if auth_rate_limited(client_ip() or "unknown"):
+        return api_error("auth_rate_limited", "登录请求过于频繁，请稍后再试。", 429)
+    state, bind = uuid.uuid4().hex, uuid.uuid4().hex
+    now = time.time()
+    with AUTH_STATES_LOCK:
+        for key in [key for key, value in AUTH_STATES.items() if now - value["created"] > AUTH_STATE_TTL]:
+            AUTH_STATES.pop(key, None)
+        AUTH_STATES[state] = {"created": now, "next": safe_next_url(request.args.get("next")),
+                              "bind": bind}
+    query = urlencode({"app_id": REFERENCE_LIB_APP_ID, "redirect_uri": auth_redirect_uri(),
+                       "state": state, "scope": REFERENCE_LIB_SCOPE})
+    response = redirect(f"{REFERENCE_LIB_BASE_URL}/authorize?{query}")
+    response.set_cookie(AUTH_PENDING_COOKIE, bind, max_age=AUTH_STATE_TTL,
+                        httponly=True, samesite="Lax", path="/")
+    return response
+
+
+@app.get("/api/auth/callback")
+def api_auth_callback():
+    if AUTH_MODE == "local":
+        abort(404)
+    if request.args.get("error"):
+        audit_admin("auth.login", result="failed", detail="authorization denied", actor="auth")
+        return _auth_failure("denied")
+    code, state = request.args.get("code", ""), request.args.get("state", "")
+    if not code or not state:
+        return _auth_failure("state_invalid")
+    with AUTH_STATES_LOCK:
+        entry = AUTH_STATES.pop(state, None)
+    bind = request.cookies.get(AUTH_PENDING_COOKIE, "")
+    if (not entry or time.time() - entry["created"] > AUTH_STATE_TTL or not bind
+            or not hmac.compare_digest(bind, entry["bind"])):
+        audit_admin("auth.login", result="failed", detail="invalid or expired state", actor="auth")
+        return _auth_failure("state_invalid")
+    try:
+        token = reference_lib_exchange(code, auth_redirect_uri())
+        info = reference_lib_user_info(token["access"])
+    except ReferenceLibError as error:
+        audit_admin("auth.login", result="failed", detail=error.code, actor="auth")
+        return _auth_failure("exchange_failed")
+    if REFERENCE_LIB_ROLE not in info["roles"]:
+        audit_admin("auth.login", target=f"rl:{info['id']}", result="failed",
+                    detail="missing anims_public", actor="auth")
+        return _auth_failure("role_required")
+    scope = info.get("scope") or token.get("scope") or ""
+    granted = set(scope.split())
+    missing = [item for item in required_reference_scopes() if item not in granted]
+    if missing:
+        audit_admin("auth.login", target=f"rl:{info['id']}", result="failed",
+                    detail=f"missing {missing[0]}", actor="auth")
+        return _auth_failure("scope_missing")
+    owner_id = f"rl:{info['id']}"
+    store_account(owner_id, info, scope, client_ip(), login=True)
+    sid = create_auth_session(owner_id, {**token, "scope": scope})
+    audit_admin("auth.login", target=owner_id, actor="auth")
+    response = redirect(entry["next"])
+    response.set_cookie(AUTH_COOKIE, sid, max_age=AUTH_SESSION_TTL, httponly=True,
+                        samesite="Lax", path="/")
+    response.delete_cookie(AUTH_PENDING_COOKIE, path="/")
+    return response
+
+
+@app.get("/api/auth/status")
+def api_auth_status():
+    if AUTH_MODE == "local":
+        abort(404)
+    profile = _auth_profile()
+    owner_id = profile and auth_session()["owner_id"]
+    claimable = 0
+    cookie = request.cookies.get(USER_COOKIE, "")
+    if USER_UID_PATTERN.fullmatch(cookie) and cookie != owner_id:
+        with JOBS_LOCK:
+            claimable = sum(1 for job in JOBS.values() if job_owner(job) == cookie)
+    if not profile:
+        return jsonify(mode=AUTH_MODE, logged_in=False, claimable=claimable)
+    return jsonify(mode=AUTH_MODE, logged_in=True, owner_id=owner_id,
+                   claimable=claimable, auth=profile)
+
+
+@app.post("/api/auth/logout")
+def api_auth_logout():
+    if AUTH_MODE == "local":
+        abort(404)
+    if request.headers.get(AUTH_HEADER) != "1":
+        abort(403)
+    sid = request.cookies.get(AUTH_COOKIE, "")
+    record = destroy_auth_session(sid)
+    if record:
+        audit_admin("auth.logout", target=record["owner_id"], actor="auth")
+        tokens = [(record.get("access_token"), "access_token"), (record.get("refresh_token"), "refresh_token")]
+        threading.Thread(target=lambda: [reference_lib_revoke(token, hint) for token, hint in tokens if token],
+                         daemon=True).start()
+    response = jsonify(ok=True)
+    response.delete_cookie(AUTH_COOKIE, path="/")
+    return response
+
+
+@app.post("/api/auth/claim")
+def api_auth_claim():
+    if AUTH_MODE == "local":
+        abort(404)
+    if request.headers.get(AUTH_HEADER) != "1":
+        abort(403)
+    session = auth_session()
+    if not session:
+        return api_error("auth_required", "请先登录公共动作参考库账号。", 401)
+    old_uid = request.cookies.get(USER_COOKIE, "")
+    if not USER_UID_PATTERN.fullmatch(old_uid) or old_uid == session["owner_id"]:
+        return jsonify(claimed=0, jobs=[])
+    owner_id, owner_name = session["owner_id"], owner_display_name(session["owner_id"])
+    claimed = []
+    with JOBS_LOCK:
+        for job_id, job in JOBS.items():
+            if job_owner(job) != old_uid:
+                continue
+            job["owner_id"], job["owner_name"] = owner_id, owner_name
+            try:
+                _persist_job_locked(job)
+            except OSError:
+                app.logger.warning("Could not persist claimed job %s", job_id, exc_info=True)
+            claimed.append(job_id)
+    if claimed:
+        audit_admin("auth.claim", target=owner_id, detail=f"{len(claimed)} job(s) from {old_uid}",
+                    actor="auth")
+    return jsonify(claimed=len(claimed), jobs=claimed)
+
+
+# --------------------------------------------------------------------------- reference library resources
+def _library_job(job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        return copy.deepcopy(job) if job else None
+
+
+def library_video_path(job_id):
+    return os.path.join(job_dir(job_id), SUB, f"{SUB}_30fps.mp4")
+
+
+LIBRARY_VIDEO_FPS = 30
+
+
+def library_motion_clip(job_id, job):
+    """Trim the transcoded clip to the frame range the job actually processed."""
+    source = library_video_path(job_id)
+    frames = int(job.get("num_frames") or 0)
+    track = job.get("track_range")
+    start = int(track[0]) if isinstance(track, (list, tuple)) and len(track) == 2 else 0
+    total = int(job.get("source_frames") or 0)
+    if frames <= 0 or (start <= 0 and 0 < total <= frames):
+        return source
+    from flowhmr.utils.runtime_video_processing import find_ffmpeg
+
+    destination = os.path.join(job_dir(job_id), "library_tmp", "video.mp4")
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    command = [find_ffmpeg(), "-y", "-ss", f"{start / LIBRARY_VIDEO_FPS:.6f}", "-i", source,
+               "-frames:v", str(frames), "-an", "-c:v", "libx264", "-preset", "veryfast",
+               "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart", destination]
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        detail = (exc.stderr or "").strip()[-300:] if isinstance(exc, subprocess.CalledProcessError) else str(exc)
+        raise ReferenceLibError("library_video_trim", f"成片裁剪失败: {detail}", 502) from exc
+    return destination
+
+
+def library_store_preview(job_id, value):
+    """Decode a browser viewport screenshot into the job's publish temp dir."""
+    if not isinstance(value, str):
+        return None, "预览图格式不正确。"
+    match = re.fullmatch(r"data:image/(png|jpeg|webp);base64,([A-Za-z0-9+/=\s]+)", value)
+    if match is None:
+        return None, "预览图格式不正确。"
+    extension = {"png": ".png", "jpeg": ".jpg", "webp": ".webp"}[match.group(1)]
+    try:
+        raw = base64.b64decode(match.group(2))
+    except (TypeError, ValueError):
+        return None, "预览图格式不正确。"
+    if not raw:
+        return None, "预览图为空。"
+    if len(raw) > LIBRARY_MAX_PREVIEW_MB * 1024 * 1024:
+        return None, f"预览图超过 {LIBRARY_MAX_PREVIEW_MB} MB。"
+    directory = os.path.join(job_dir(job_id), "library_tmp")
+    try:
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, "preview" + extension)
+        with open(path, "wb") as handle:
+            handle.write(raw)
+    except OSError:
+        return None, "预览图保存失败。"
+    return path, None
+
+
+def library_publish_gate(job):
+    """Return (ok, error_code) for publishing this job to the public library."""
+    if not LIBRARY_ENABLED or AUTH_MODE == "local":
+        return False, "library_disabled"
+    owner_id = job_owner(job)
+    if not RL_OWNER_PATTERN.fullmatch(owner_id):
+        return False, "library_owner_unlinked"
+    requester = request_identity()
+    if requester != owner_id:
+        if not admin_session_valid():
+            return False, "library_not_owner"
+        if not LIBRARY_ALLOW_ADMIN_PUBLISH:
+            return False, "library_admin_publish_disabled"
+    if job.get("status") != "done":
+        return False, "library_job_not_done"
+    if not os.path.isfile(library_video_path(job["id"])):
+        return False, "library_video_missing"
+    if LIBRARY_PUBLISH_REQUIRE_RATING:
+        rating = job.get("rating")
+        if not isinstance(rating, dict) or not rating.get("score"):
+            return False, "rating_required"
+    if not job.get("allow_library"):
+        return False, "library_not_allowed"
+    _, _, reason = owner_session_record(owner_id, LIBRARY_SCOPE_WRITE)
+    if reason:
+        return False, reason
+    if not account_has_role(owner_id):
+        return False, "library_owner_role_missing"
+    return True, None
+
+
+def library_normalize_tags(value):
+    """Accept a comma-separated string or string list; trim, dedupe and cap the tags."""
+    if isinstance(value, str):
+        parts = re.split(r"[,，、;；\n]", value)
+    elif isinstance(value, list):
+        parts = [item for item in value if isinstance(item, str)]
+    else:
+        return []
+    tags = []
+    for part in parts:
+        text = re.sub(r"\s+", " ", part).strip()
+        if text and text not in tags:
+            tags.append(text[:32])
+        if len(tags) >= 20:
+            break
+    return tags
+
+
+def _library_require_session():
+    session = auth_session()
+    if session is None:
+        return None, api_error("auth_required", "请先登录公共动作参考库账号。", 401)
+    if not LIBRARY_ENABLED:
+        return None, api_error("library_disabled", "参考库功能未启用。", 404)
+    return session, None
+
+
+@app.get("/api/library/config")
+def api_library_config():
+    session = auth_session()
+    payload = {"enabled": bool(LIBRARY_ENABLED and AUTH_MODE != "local" and session),
+               "mode": AUTH_MODE, "max_upload_mb": LIBRARY_MAX_VIDEO_MB,
+               "max_motion_mb": LIBRARY_MAX_MOTION_MB, "upload_root_id": LIBRARY_UPLOAD_ROOT_ID}
+    job_id = (request.args.get("job_id") or "").strip()
+    if job_id:
+        job = _library_job(job_id)
+        if job is None:
+            abort(404)
+        require_job_access(job)
+        owner_id = job_owner(job)
+        owner_name = owner_display_name(owner_id)
+        owner_session_ok = owner_has_write = False
+        if RL_OWNER_PATTERN.fullmatch(owner_id):
+            sid, record, _ = owner_session_record(owner_id)
+            owner_session_ok = sid is not None
+            owner_has_write = owner_session_ok and LIBRARY_SCOPE_WRITE in (record.get("scope") or "").split()
+        ok, reason = library_publish_gate(job)
+        record = library_publish_get(job_id)
+        payload.update({"job_id": job_id, "owner_id": owner_id, "owner_name": owner_name,
+                        "owner_session_ok": owner_session_ok, "owner_has_write": owner_has_write,
+                        "can_publish": ok, "reason": reason, "allow_library": bool(job.get("allow_library")),
+                        "publish": public_publish_record(record) if record else None})
+    return jsonify(payload)
+
+
+@app.get("/api/library/resources")
+def api_library_resources():
+    session, error = _library_require_session()
+    if error is not None:
+        return error
+    params = {}
+    for key in ("media_type", "keyword", "child_type", "child_id"):
+        value = (request.args.get(key) or "").strip()
+        if value:
+            params[key] = value
+    for key, default, ceiling in (("page", 1, 10000), ("page_size", 20, 100)):
+        try:
+            number = int(request.args.get(key) or default)
+        except ValueError:
+            return api_error("library_query", "参考库查询参数无效。", 400)
+        params[key] = min(max(1, number), ceiling)
+    cache_key = "resources:" + json.dumps(params, sort_keys=True)
+    cached = library_cache_get(cache_key)
+    if cached is not None:
+        return jsonify(cached)
+    try:
+        payload = reference_lib_user_request("GET", "resources?" + urlencode(params), session["access_token"])
+    except ReferenceLibError as error:
+        return api_error(error.code, error.message, error.status or 502)
+    data = _reference_lib_unwrap(payload)
+    library_cache_put(cache_key, data)
+    return jsonify(data)
+
+
+@app.get("/api/library/resources/<resource_id>")
+def api_library_resource(resource_id):
+    session, error = _library_require_session()
+    if error is not None:
+        return error
+    if not resource_id.isdigit():
+        return api_error("library_query", "参考库资源编号无效。", 400)
+    cache_key = f"resource:{resource_id}"
+    cached = library_cache_get(cache_key)
+    if cached is not None:
+        return jsonify(cached)
+    try:
+        payload = reference_lib_user_request("GET", f"resources/{resource_id}", session["access_token"])
+    except ReferenceLibError as error:
+        return api_error(error.code, error.message, error.status or 502)
+    data = _reference_lib_unwrap(payload)
+    library_cache_put(cache_key, data)
+    return jsonify(data)
+
+
+@app.post("/api/library/resources/links")
+def api_library_resource_links():
+    session, error = _library_require_session()
+    if error is not None:
+        return error
+    value = request.get_json(silent=True)
+    ids = value.get("resource_ids") if isinstance(value, dict) else None
+    if not isinstance(ids, list) or not 1 <= len(ids) <= 200:
+        return api_error("library_query", "请选择 1 到 200 个参考库资源。", 400)
+    normalized = []
+    for item in ids:
+        text = str(item)
+        if not text.isdigit():
+            return api_error("library_query", "参考库资源编号无效。", 400)
+        normalized.append(text)
+    cache_key = "links:" + ",".join(sorted(normalized))
+    cached = library_cache_get(cache_key)
+    if cached is not None:
+        return jsonify(cached)
+    try:
+        payload = reference_lib_user_request("POST", "resources/links", session["access_token"],
+                                             {"resource_ids": normalized})
+    except ReferenceLibError as error:
+        return api_error(error.code, error.message, error.status or 502)
+    data = _reference_lib_unwrap(payload)
+    if isinstance(payload, dict) and not isinstance(data, list):
+        for key in ("data", "result"):
+            if isinstance(payload.get(key), list):
+                data = payload[key]
+                break
+    library_cache_put(cache_key, data, ttl=120)
+    return jsonify(data)
+
+
+@app.get("/api/library/resources/<resource_id>/file")
+def api_library_resource_file(resource_id):
+    session, error = _library_require_session()
+    if error is not None:
+        return error
+    if not resource_id.isdigit():
+        return api_error("library_query", "参考库资源编号无效。", 400)
+    kind = (request.args.get("kind") or "").strip()
+    if kind and kind not in ("image", "video"):
+        return api_error("library_query", "下载类型无效。", 400)
+    try:
+        location = reference_lib_download_location(resource_id, kind, session["access_token"])
+    except ReferenceLibError as error:
+        return api_error(error.code, error.message, error.status or 502)
+    return redirect(location, code=302)
+
+
+def library_publish_update(job_id, **changes):
+    with LIBRARY_PUBLISH_LOCK:
+        record = LIBRARY_PUBLISH.get(job_id)
+        if record is None:
+            return
+        record.update(changes)
+        record["updated"] = time.time()
+        if changes.get("state") in ("done", "partial", "failed"):
+            record["finished"] = record["updated"]
+        save_library_publish_locked()
+
+
+def _library_session_token(sid):
+    with AUTH_SESSIONS_LOCK:
+        stored = AUTH_SESSIONS.get(sid)
+        record = dict(stored) if stored else None
+    if record is None:
+        raise ReferenceLibError("library_owner_session_missing", "任务创建人的登录已失效。", 401)
+    if record.get("access_expires_at", 0.0) - time.time() <= AUTH_REFRESH_MARGIN:
+        if not refresh_auth_session(sid, record):
+            raise ReferenceLibError("library_owner_session_missing", "任务创建人的登录已失效。", 401)
+        with AUTH_SESSIONS_LOCK:
+            stored = AUTH_SESSIONS.get(sid)
+            record = dict(stored) if stored else None
+        if record is None:
+            raise ReferenceLibError("library_owner_session_missing", "任务创建人的登录已失效。", 401)
+    return record["access_token"]
+
+
+def _disposition_filename(disposition, fallback):
+    if not isinstance(disposition, str):
+        return fallback
+    match = re.search(r"filename\*=UTF-8''([^;]+)", disposition, re.IGNORECASE)
+    if match:
+        try:
+            from urllib.parse import unquote
+
+            return os.path.basename(unquote(match.group(1)).strip().strip('"'))
+        except ValueError:
+            return fallback
+    match = re.search(r'filename="?([^";]+)"?', disposition, re.IGNORECASE)
+    return os.path.basename(match.group(1).strip()) if match else fallback
+
+
+def library_fetch_motion(job_id, sid, motion_format, destination):
+    """Render a server-side motion export through the local HTTP endpoint."""
+    if motion_format not in LIBRARY_MOTION_FORMATS:
+        raise ReferenceLibError("library_motion_format", "不支持的动作格式。", 400)
+    query = "?profile=flowhmr&mesh=1" if motion_format == "fbx" else ""
+    url = f"http://127.0.0.1:{ARGS.port}/api/jobs/{job_id}/{motion_format}{query}"
+    req = urllib.request.Request(url, headers={"Cookie": f"{AUTH_COOKIE}={sid}", "Accept": "*/*"})
+    try:
+        with urllib.request.urlopen(req, timeout=300) as response:
+            disposition = response.headers.get("Content-Disposition")
+            if not disposition:
+                raise ReferenceLibError("library_motion_failed", "无法生成动作文件。", 502)
+            filename = _disposition_filename(disposition, f"{job_id}.{motion_format}")
+            with open(destination, "wb") as handle:
+                shutil.copyfileobj(response, handle, 1024 * 1024)
+    except urllib.error.HTTPError as error:
+        app.logger.warning("Motion export failed for job %s (%s)", job_id, error.code)
+        raise ReferenceLibError("library_motion_failed", "无法生成动作文件。", 502)
+    except (urllib.error.URLError, OSError, TimeoutError) as error:
+        app.logger.warning("Motion export failed for job %s: %s", job_id, error)
+        raise ReferenceLibError("library_motion_failed", "无法生成动作文件。", 502)
+    return filename
+
+
+def library_publish_worker(job_id, sid):
+    try:
+        record = library_publish_get(job_id)
+        job = _library_job(job_id)
+        if record is None:
+            return
+        if job is None:
+            library_publish_update(job_id, state="failed", error_code="library_job_missing",
+                                   error="任务不存在。")
+            return
+        video = library_video_path(job_id)
+        video_bytes = os.path.getsize(video) if os.path.isfile(video) else 0
+        if not video_bytes:
+            library_publish_update(job_id, state="failed", error_code="library_video_missing",
+                                   error="成片文件不存在。")
+            return
+        stem = os.path.splitext(os.path.basename(video))[0]
+        upload_name = re.sub(r'[\r\n"]', "_", record.get("name") or stem) or stem
+        if not record.get("video_resource_id"):
+            library_publish_update(job_id, state="uploading", step="video")
+            clip = library_motion_clip(job_id, job)
+            try:
+                if os.path.getsize(clip) > LIBRARY_MAX_VIDEO_MB * 1024 * 1024:
+                    raise ReferenceLibError("library_file_too_large",
+                                            f"成片超过 {LIBRARY_MAX_VIDEO_MB} MB。", 413)
+                token = _library_session_token(sid)
+                fields = {"name": upload_name, "task_id": job_id,
+                          "description": record.get("description") or ""}
+                if record.get("tags"):
+                    fields["tags"] = ",".join(record["tags"])
+                if record.get("rating"):
+                    fields["rating"] = record["rating"]
+                payload = reference_lib_upload("resources/upload", token, fields,
+                                               [("file", f"{upload_name}.mp4", "video/mp4", clip)])
+                data = _reference_lib_unwrap(payload)
+                resource_id = data.get("resource_id") or data.get("id")
+                if not resource_id:
+                    raise ReferenceLibError("library_upload_failed", "上传成片后未返回资源编号。", 502)
+                resource_id = str(resource_id)
+                library_publish_update(job_id, state="uploaded_video", step="video",
+                                       video_resource_id=resource_id, resource_id=resource_id)
+                record = library_publish_get(job_id) or record
+            finally:
+                if clip != video:
+                    try:
+                        os.remove(clip)
+                    except OSError:
+                        pass
+        if not record.get("publish_motion"):
+            library_publish_update(job_id, state="done", step="done")
+            return
+        resource_id = record.get("video_resource_id")
+        if record.get("motion_resource_id"):
+            library_publish_update(job_id, state="done", step="done")
+            return
+        library_publish_update(job_id, state="uploading_motion", step="motion")
+        tmp_dir = os.path.join(job_dir(job_id), "library_tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        destination = os.path.join(tmp_dir, f"motion.{record.get('motion_format') or 'fbx'}")
+        try:
+            baked = os.path.join(tmp_dir, "target.fbx")
+            format_name = record.get("motion_format") or "fbx"
+            use_baked = (format_name == "fbx" and os.path.isfile(baked)
+                         and os.path.getsize(baked) > 0)
+            if use_baked:
+                os.replace(baked, destination)
+                filename = os.path.basename(destination)
+            else:
+                filename = library_fetch_motion(job_id, sid, format_name, destination)
+            extension = os.path.splitext(filename)[1].lower().lstrip(".")
+            if extension not in ("fbx", "vrma", "vmd"):
+                raise ReferenceLibError("library_motion_format", "该动作格式暂不支持发布。", 415)
+            size = os.path.getsize(destination)
+            if not size:
+                raise ReferenceLibError("library_motion_empty", "动作文件为空，无法发布。", 502)
+            if size > LIBRARY_MAX_MOTION_MB * 1024 * 1024:
+                raise ReferenceLibError("library_file_too_large",
+                                        f"动作文件超过 {LIBRARY_MAX_MOTION_MB} MB。", 413)
+            mime = "model/gltf-binary" if extension == "vrma" else "application/octet-stream"
+            token = _library_session_token(sid)
+            fields = {"related_type": record.get("related_type") or "anims", "task_id": job_id,
+                      "remark": record.get("description") or "FlowHMR"}
+            if record.get("tags"):
+                fields["tags"] = ",".join(record["tags"])
+            if record.get("rating"):
+                fields["rating"] = record["rating"]
+            files = [("file", filename, mime, destination)]
+            preview_path = record.get("preview_path")
+            if isinstance(preview_path, str) and os.path.isfile(preview_path):
+                preview_extension = os.path.splitext(preview_path)[1].lower()
+                preview_mime = {".png": "image/png", ".jpg": "image/jpeg",
+                                ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(preview_extension)
+                if preview_mime:
+                    files.append(("preview_file", f"preview{preview_extension}",
+                                  preview_mime, preview_path))
+            payload = reference_lib_upload(f"resources/{resource_id}/children/upload", token,
+                                           fields, files)
+            data = _reference_lib_unwrap(payload)
+            uploaded = data.get("uploaded") if isinstance(data.get("uploaded"), list) else []
+            if not uploaded:
+                raise ReferenceLibError("library_motion_failed", "上传动作后未返回资源编号。", 502)
+            motion_id = uploaded[0].get("resource_id") if isinstance(uploaded[0], dict) else None
+            library_publish_update(job_id, state="done", step="done",
+                                   motion_resource_id=str(motion_id) if motion_id else None)
+        except ReferenceLibError as error:
+            library_publish_update(job_id, state="partial", step="motion", error_code=error.code,
+                                   error=error.message)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+    except ReferenceLibError as error:
+        current = library_publish_get(job_id) or {}
+        state = "partial" if current.get("video_resource_id") else "failed"
+        library_publish_update(job_id, state=state, error_code=error.code, error=error.message)
+    except Exception as error:  # uploads must never crash the worker thread
+        app.logger.exception("Library publish failed for job %s", job_id)
+        current = library_publish_get(job_id) or {}
+        state = "partial" if current.get("video_resource_id") else "failed"
+        library_publish_update(job_id, state=state, error_code="library_publish_failed", error=str(error)[:300])
+    finally:
+        with LIBRARY_PUBLISH_LOCK:
+            LIBRARY_PUBLISH_ACTIVE.discard(job_id)
+
+
+@app.post("/api/jobs/<job_id>/library-motion")
+def api_job_library_motion(job_id):
+    """Keep the browser-baked character FBX for the next reference-library backup."""
+    job = _library_job(job_id)
+    if job is None:
+        abort(404)
+    require_job_access(job)
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        return api_error("library_motion", "缺少动作文件。", 400)
+    if not upload.filename.lower().endswith(".fbx"):
+        return api_error("library_motion_format", "仅支持 FBX 动作文件。", 415)
+    directory = os.path.join(job_dir(job_id), "library_tmp")
+    temporary = os.path.join(directory, "target.tmp")
+    try:
+        os.makedirs(directory, exist_ok=True)
+        upload.save(temporary)
+        size = os.path.getsize(temporary)
+        if not size or size > LIBRARY_MAX_MOTION_MB * 1024 * 1024:
+            os.remove(temporary)
+            return api_error("library_file_too_large", f"动作文件超过 {LIBRARY_MAX_MOTION_MB} MB。", 413)
+        os.replace(temporary, os.path.join(directory, "target.fbx"))
+    except OSError:
+        return api_error("library_motion", "动作文件保存失败。", 500)
+    return jsonify({"ok": True, "bytes": size})
+
+
+@app.post("/api/library/publish")
+def api_library_publish():
+    session = auth_session()
+    if session is None:
+        return api_error("auth_required", "请先登录公共动作参考库账号。", 401)
+    value = request.get_json(silent=True)
+    if not isinstance(value, dict) or value.get("consent") is not True:
+        return api_error("library_consent_required", "发布到公共参考库前需要确认。", 400)
+    job_id = value.get("job_id")
+    if not isinstance(job_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", job_id):
+        return api_error("library_query", "任务编号无效。", 400)
+    job = _library_job(job_id)
+    if job is None:
+        abort(404)
+    require_job_access(job)
+    ok, code = library_publish_gate(job)
+    if not ok:
+        return api_error(code, "当前任务不能发布到公共参考库。", 409)
+    meta = job.get("rating") if isinstance(job.get("rating"), dict) else {}
+    name = value.get("name") if isinstance(value.get("name"), str) else ""
+    description = value.get("description") if isinstance(value.get("description"), str) else ""
+    if not description.strip():
+        description = meta.get("comment") or ""
+    tags = library_normalize_tags(value.get("tags")) or library_normalize_tags(meta.get("tags"))
+    rating = value.get("rating")
+    if rating is None:
+        rating = int(meta.get("score") or 0)
+    if type(rating) is not int or not 0 <= rating <= 5:
+        return api_error("library_rating", "评分需为 0–5 的整数。", 400)
+    preview_path = None
+    if value.get("preview") is not None:
+        preview_path, preview_error = library_store_preview(job_id, value.get("preview"))
+        if preview_error:
+            return api_error("library_preview", preview_error, 400)
+    with LIBRARY_PUBLISH_LOCK:
+        if job_id in LIBRARY_PUBLISH_ACTIVE:
+            return api_error("library_publish_busy", "该任务正在发布中。", 409)
+        existing = LIBRARY_PUBLISH.get(job_id)
+        if existing and existing.get("state") == "done":
+            return api_error("library_publish_exists", "该任务已经发布过了。", 409)
+        LIBRARY_PUBLISH_ACTIVE.add(job_id)
+    owner_id = job_owner(job)
+    motion_format = value.get("motion_format") if value.get("motion_format") in LIBRARY_MOTION_FORMATS else "fbx"
+    related_type = value.get("related_type") if value.get("related_type") in ("anims", "model") else "anims"
+    record = {"job_id": job_id, "owner_id": owner_id, "owner_name": owner_display_name(owner_id),
+              "published_by": request_identity(), "state": "queued", "step": "queued",
+              "name": name.strip()[:120] or export_stem(job), "description": description.strip()[:500],
+              "rating": rating, "tags": tags, "preview_path": preview_path,
+              "publish_motion": bool(value.get("publish_motion", True)), "motion_format": motion_format,
+              "related_type": related_type,
+              # A partial publish has already created the video resource; keep it
+              # so retrying only re-uploads the missing motion.
+              "video_resource_id": existing.get("video_resource_id") if existing and existing.get("state") == "partial" else None,
+              "motion_resource_id": None,
+              "resource_id": existing.get("resource_id") if existing and existing.get("state") == "partial" else None,
+              "error": None, "error_code": None,
+              "created": time.time(), "updated": time.time()}
+    with LIBRARY_PUBLISH_LOCK:
+        LIBRARY_PUBLISH[job_id] = record
+        save_library_publish_locked()
+    sid, _, reason = owner_session_record(owner_id, LIBRARY_SCOPE_WRITE)
+    if not sid:
+        library_publish_update(job_id, state="failed",
+                               error_code=reason or "library_owner_session_missing",
+                               error="任务创建人的登录已失效。")
+        with LIBRARY_PUBLISH_LOCK:
+            LIBRARY_PUBLISH_ACTIVE.discard(job_id)
+        return api_error(reason or "library_owner_session_missing", "任务创建人的登录已失效。", 409)
+    threading.Thread(target=library_publish_worker, args=(job_id, sid), daemon=True).start()
+    audit_admin("library.publish", target=owner_id, detail=f"{job_id} by {request_identity()}", actor="library")
+    return jsonify(public_publish_record(record)), 202
+
+
+@app.get("/api/library/publish/<job_id>")
+def api_library_publish_state(job_id):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", job_id):
+        abort(404)
+    job = _library_job(job_id)
+    if job is None:
+        abort(404)
+    require_job_access(job)
+    record = library_publish_get(job_id)
+    if record is None:
+        return jsonify(publish=None)
+    return jsonify(publish=public_publish_record(record))
 
 
 @app.route("/")
@@ -2363,6 +4077,9 @@ def submission_metadata(values, params, owner=None):
         owner_name = owner_name or owner_display_name(owner_id)
     if owner_id not in (MCP_OWNER, LEGACY_OWNER) and user_disabled(owner_id) and not admin_session_valid():
         raise UserMessage('账号已被管理员禁用，无法提交新任务。', 'user_disabled')
+    if (isinstance(owner_id, str) and RL_OWNER_PATTERN.fullmatch(owner_id)
+            and not account_has_role(owner_id)):
+        raise UserMessage('当前账号缺少 anims_public 角色，无法提交新任务。', 'auth_role_required')
     return {'source': source, 'selection_policy': policy,
             'owner_id': owner_id, 'owner_name': owner_name, 'client_ip': client_ip()}
 
@@ -3070,6 +4787,7 @@ def api_cancel_job(job_id):
                 JOB_QUEUE.remove(mid)
                 member.update(status="cancelled", message="Stopped by user", finished=time.time())
                 _persist_job_locked(member)
+                notify_job_outcome(dict(member))
                 continue
             CANCEL_REQUESTS.add(mid)
             member.update(status="cancel_requested", message="Stop requested; stopping at the next safe step")
@@ -3135,19 +4853,16 @@ def parse_rating(body):
     if not isinstance(body, dict):
         raise UserMessage("评分数据无效。", "rating_invalid")
     score = body.get("score")
-    tags = body.get("tags") or []
+    tags = library_normalize_tags(body.get("tags"))
     comment = body.get("comment") or ""
     allow_library = body.get("allow_library", True)
     if type(score) is not int or not 1 <= score <= 5:
         raise UserMessage("评分需为 1–5 星。", "rating_score")
-    if (not isinstance(tags, list) or len(tags) > 3
-            or any(not isinstance(tag, str) or tag not in RATING_TAGS for tag in tags)):
-        raise UserMessage("评分标签无效。", "rating_tags")
     if not isinstance(comment, str) or len(comment) > 200:
-        raise UserMessage("评语不能超过 200 字。", "rating_comment")
+        raise UserMessage("备注不能超过 200 字。", "rating_comment")
     if type(allow_library) is not bool:
         raise UserMessage("资源库选项无效。", "rating_library")
-    return score, list(dict.fromkeys(tags)), comment.strip(), allow_library
+    return score, tags, comment.strip(), allow_library
 
 
 @app.route("/api/jobs/<job_id>/rating", methods=["POST", "DELETE"])
@@ -3715,14 +5430,16 @@ def api_fbx(job_id):
     # The final NPZ is authoritative. Re-export old jobs with the corrected
     # rig instead of sending a legacy FBX saved before the exporter fix.
     exports = os.path.join(os.path.dirname(source), "exports")
-    revision = 5 if first_pose != "none" else 4
-    prefix = f"fbx_scene_v5_{signature}" if chosen is not None else f"fbx_mmr_v{revision}"
+    revision = 6 if first_pose != "none" else 5
+    prefix = f"fbx_scene_v6_{signature}" if chosen is not None else f"fbx_mmr_v{revision}"
     if profile != "flowhmr":
         revision = 3 if profile in ("metahuman", "mixamo", "maya_adv") else 2
         if template_kind == "mixamo":
             revision += 1  # Invalidate pre-fix Mixamo and iClone template exports.
             if profile == "mixamo":
                 revision += 1  # Separate from existing generic Mixamo FBX.
+        elif profile in ("mixamo", "maya_adv"):
+            revision += 1  # Invalidate constructive rigs saved in metres.
         prefix = f"fbx_{profile}_v{revision}_{signature or 'single'}"
     pose_tag = f"_{first_pose}_pose" if first_pose != "none" else ""
     cache_name = f"{prefix}_{file_stamp(source)}_{suffix}{tag}{pose_tag}"
@@ -4318,6 +6035,8 @@ def admin_user_rows():
     _, queued_by_owner = JOB_QUEUE.counts()
     with USERS_LOCK:
         users = {uid: copy.deepcopy(record) for uid, record in USERS.items()}
+    with ACCOUNTS_LOCK:
+        accounts = {uid: copy.deepcopy(record) for uid, record in ACCOUNTS.items()}
 
     counts, disk = defaultdict(int), defaultdict(int)
     sizes = {}
@@ -4338,17 +6057,20 @@ def admin_user_rows():
             if ip:
                 ips[ip].add(uid)
 
-    owners = set(users) | set(counts) | set(queued_by_owner)
+    owners = set(users) | set(accounts) | set(counts) | set(queued_by_owner)
     rows = []
     for uid in owners:
         record = users.get(uid) or {}
+        account = accounts.get(uid) or {}
         mine = [ip for ip in ips if uid in ips[ip]]
         rows.append({
             "uid": uid, "name": owner_display_name(uid),
-            "created": record.get("created"), "last_seen": record.get("last_seen"),
-            "last_ip": record.get("last_ip"), "ips": sorted(mine),
+            "created": record.get("created") or account.get("created"),
+            "last_seen": record.get("last_seen") or account.get("last_login"),
+            "last_ip": record.get("last_ip") or account.get("last_ip"), "ips": sorted(mine),
             "shared_ips": sorted(ip for ip in mine if len(ips[ip]) > 1),
-            "disabled": bool(record.get("disabled")),
+            "disabled": bool(account.get("disabled") if account else record.get("disabled")),
+            "platform": bool(account), "code": account.get("code"), "roles": account.get("roles") or [],
             "jobs": counts.get(uid, 0), "queued": queued_by_owner.get(uid, 0),
             "disk_bytes": disk.get(uid, 0),
         })
@@ -4452,6 +6174,7 @@ def api_admin_queue_action():
                 if row is not None and row.get("status") == "queued":
                     row.update(status="cancelled", message="Queue cleared by admin", finished=time.time())
                     _persist_job_locked(row)
+                    notify_job_outcome(dict(row))
         audit_admin("queue.clear", result="ok", detail=f"{len(removed)} queued job(s)")
         UI_EVENTS.publish('jobs', {})
         return jsonify({**admin_queue_snapshot(), "ok": True})
@@ -4479,6 +6202,7 @@ def api_admin_queue_action():
             if removed and row is not None:
                 row.update(status="cancelled", message="Stopped by admin", finished=time.time())
                 _persist_job_locked(row)
+                notify_job_outcome(dict(row))
         if not removed:
             return api_error("admin_queue_invalid", "任务不在排队中。", 409)
         audit_admin("queue.cancel", target=job_id)
@@ -4552,7 +6276,7 @@ def api_admin_update_user(uid):
     body = request.get_json(silent=True)
     if not isinstance(body, dict) or not set(body) <= {"name", "disabled"}:
         return api_error("admin_user_invalid", "无效的用户修改请求。", 400)
-    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", uid):
+    if not re.fullmatch(r"(?:rl:\d{1,20}|[A-Za-z0-9_-]{1,64})", uid):
         return api_error("admin_user_invalid", "无效的用户 ID。", 400)
     name = body.get("name")
     if name is not None:
@@ -4560,20 +6284,46 @@ def api_admin_update_user(uid):
         if not name:
             return api_error("user_name_invalid", "昵称不能为空。", 400)
     changes = {}
-    with USERS_LOCK:
-        record = USERS.setdefault(uid, _normalize_user(uid, {}))
+    if RL_OWNER_PATTERN.fullmatch(uid):
         if name is not None:
-            record["name"] = name
-            changes["name"] = name
-        if "disabled" in body:
-            if not isinstance(body["disabled"], bool):
-                return api_error("admin_user_invalid", "disabled 必须是布尔值。", 400)
-            record["disabled"] = body["disabled"]
-            changes["disabled"] = body["disabled"]
-        save_users_locked()
+            return api_error("name_managed", "昵称由公共动作参考库统一管理，无法在此修改。", 409)
+        with ACCOUNTS_LOCK:
+            record = ACCOUNTS.get(uid)
+            if record is None:
+                abort(404)
+            if "disabled" in body:
+                if not isinstance(body["disabled"], bool):
+                    return api_error("admin_user_invalid", "disabled 必须是布尔值。", 400)
+                record["disabled"] = body["disabled"]
+                changes["disabled"] = body["disabled"]
+            save_accounts_locked()
+    else:
+        with USERS_LOCK:
+            record = USERS.setdefault(uid, _normalize_user(uid, {}))
+            if name is not None:
+                record["name"] = name
+                changes["name"] = name
+            if "disabled" in body:
+                if not isinstance(body["disabled"], bool):
+                    return api_error("admin_user_invalid", "disabled 必须是布尔值。", 400)
+                record["disabled"] = body["disabled"]
+                changes["disabled"] = body["disabled"]
+            save_users_locked()
     audit_admin("user.update", target=uid, result="ok", detail=json.dumps(changes, ensure_ascii=False))
     row = next((item for item in admin_user_rows() if item["uid"] == uid), None)
     return jsonify(user=row)
+
+
+@app.post('/api/admin/users/<uid>/logout')
+def api_admin_user_logout(uid):
+    error = admin_guard(write=True)
+    if error:
+        return error
+    if not RL_OWNER_PATTERN.fullmatch(uid):
+        return api_error("admin_user_invalid", "只有平台账号可以强制下线。", 400)
+    removed = destroy_owner_sessions(uid)
+    audit_admin("auth.force_logout", target=uid, detail=f"{len(removed)} session(s)")
+    return jsonify(ok=True, sessions=len(removed))
 
 
 @app.get('/api/admin/users/<uid>/ips')
@@ -4762,6 +6512,11 @@ def parse_args():
                    help="Trust the rightmost X-Forwarded-For hop as client IP (only behind a trusted proxy)")
     p.add_argument("--admin-key", default=None,
                    help="Enable the /admin console with this secret (or set FLOWHMR_ADMIN_KEY)")
+    p.add_argument("--auth-config", default=None,
+                   help="Reference library app config (default: tools/web/auth_config.json)")
+    p.add_argument("--auth-mode", choices=AUTH_MODES, default=None,
+                   help="Override the identity mode from the config file: local (device cookie), "
+                        "optional (device cookie + login), reference (login required)")
     args = p.parse_args()
     if args.sam_chunk_default < 1:
         p.error("--sam-chunk-default must be a positive integer")
@@ -4777,6 +6532,22 @@ def main():
     global ARGS, INSPECTION, ADMIN_KEY
     ARGS = parse_args()
     ADMIN_KEY = (ARGS.admin_key or os.environ.get("FLOWHMR_ADMIN_KEY") or "").strip()
+    apply_auth_config(os.path.abspath(ARGS.auth_config) if ARGS.auth_config else None, ARGS.auth_mode)
+    if AUTH_MODE not in AUTH_MODES:
+        raise SystemExit(f"Invalid auth mode {AUTH_MODE!r}; expected one of {', '.join(AUTH_MODES)}")
+    if AUTH_MODE != "local":
+        problems = []
+        if not REFERENCE_LIB_SECRET:
+            problems.append(f"missing \"secret\" in {AUTH_CONFIG_PATH}")
+        if not REFERENCE_LIB_APP_ID:
+            problems.append(f"missing \"app_id\" in {AUTH_CONFIG_PATH}")
+        if not REFERENCE_LIB_BASE_URL.startswith(("http://", "https://")):
+            problems.append(f"\"base_url\" in {AUTH_CONFIG_PATH} must be an http(s) URL")
+        if not PUBLIC_BASE_URL.startswith(("http://", "https://")):
+            problems.append(f"\"public_base_url\" in {AUTH_CONFIG_PATH} must be an absolute http(s) URL "
+                            "and match the platform redirect whitelist")
+        if problems:
+            raise SystemExit("Cannot enable reference library login:\n  - " + "\n  - ".join(problems))
     if ARGS.ckpt:
         ARGS.ckpt = os.path.abspath(ARGS.ckpt)
     if ARGS.model_cfg:
@@ -4785,12 +6556,20 @@ def main():
     os.makedirs(ARGS.work_dir, exist_ok=True)
     ensure_model_folders()
     load_users()
+    load_accounts()
+    load_auth_sessions()
+    load_library_publish()
     restore_jobs()
     load_admin_settings()
     os.chdir(REPO_ROOT)  # body-model / asset paths are repo-relative
     INSPECTION = PreviewInspection()
     threading.Thread(target=worker_loop, daemon=True).start()
+    if AUTH_MODE != "local":
+        threading.Thread(target=auth_role_watch, daemon=True).start()
     print(f"\n  FlowHMR web demo ready:  http://{ARGS.host}:{ARGS.port}\n")
+    if AUTH_MODE != "local":
+        print(f"  Login mode:              {AUTH_MODE} ({REFERENCE_LIB_BASE_URL})\n")
+        print(f"  OAuth callback:          {auth_redirect_uri()}\n")
     if ADMIN_KEY:
         print(f"  Admin console:           http://{ARGS.host}:{ARGS.port}/admin\n")
     # The page refreshes the job list every few seconds; drop those access-log

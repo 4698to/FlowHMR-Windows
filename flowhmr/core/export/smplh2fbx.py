@@ -42,6 +42,10 @@ FBX_JOINT_NAMES = (
 )
 HEAD_JOINT = FBX_JOINT_NAMES.index("Head")
 
+# SMPL-H geometry is authored in metres. FBX files declare and bake centimetres
+# so 3ds Max imports the rig at its native size instead of rescaling it.
+FBX_UNIT_SCALE = 100.0
+
 
 def _align_direction(source, target):
     source = source / np.linalg.norm(source)
@@ -295,8 +299,12 @@ class SMPLH2FBX:
             names, tip_names = mixamo_bone_names(FBX_JOINT_NAMES, tips)
         elif profile == "maya_adv":
             names = tuple("Spine3" if name == "Spine2" else name for name in names)
-        skel_nodes = build_skeleton_nodes(self.mgr, scene, local_offsets, parents, names,
-                                          rest_rotations=local_rest, tip_lengths=tips, tip_names=tip_names, parent_node=parent_node,
+        # The scene and its geometry are in centimetres.
+        scale = FBX_UNIT_SCALE
+        skel_nodes = build_skeleton_nodes(self.mgr, scene, local_offsets * scale, parents, names,
+                                          rest_rotations=local_rest,
+                                          tip_lengths={i: length * scale for i, length in tips.items()},
+                                          tip_names=tip_names, parent_node=parent_node,
                                           reference_name="FlowHMR Motion" if number is None else f"FlowHMR Person {number}")
         if export_mesh:
             if variant_path is not None:
@@ -304,15 +312,15 @@ class SMPLH2FBX:
 
                 mesh = fitted_skin(variant_path, mesh.astype(np.float32), joints.astype(np.float32),
                                    self.smpl_data["weights"], self.smpl_data["faces"], parents)
-            geo_node = build_mesh_node(scene, mesh + floor_offset, self.smpl_data["faces"], uv_coords=self.uv_coords,
-                                       uv_faces=self.uv_faces, parent_node=parent_node,
+            geo_node = build_mesh_node(scene, (mesh + floor_offset) * scale, self.smpl_data["faces"],
+                                       uv_coords=self.uv_coords, uv_faces=self.uv_faces, parent_node=parent_node,
                                        node_name="Geometry" if number is None else f"Person {number} Mesh")
             apply_skinning(scene, geo_node, skel_nodes, self.smpl_data["weights"])
         else:
             store_bind_pose(scene, skel_nodes)
 
-        animate_translation(layer, skel_nodes[0], trans + offsets[0], frame_dur, start_frame=start,
-                            preroll=reference_translation)
+        animate_translation(layer, skel_nodes[0], (trans + offsets[0]) * scale, frame_dur, start_frame=start,
+                            preroll=None if reference_translation is None else reference_translation * scale)
         for i, node in enumerate(skel_nodes):
             animate_rotation_from_rotmats(layer, node, rotations[:, i], frame_dur, start_frame=start,
                                           preroll=reference_rotations[i] if reference else None)
@@ -374,8 +382,8 @@ class SMPLH2FBX:
         try:
             settings = scene.GetGlobalSettings()
             settings.SetAxisSystem(fbx.FbxAxisSystem.MayaYUp)
-            settings.SetSystemUnit(fbx.FbxSystemUnit.m)
-            settings.SetOriginalSystemUnit(fbx.FbxSystemUnit.m)
+            settings.SetSystemUnit(fbx.FbxSystemUnit.cm)
+            settings.SetOriginalSystemUnit(fbx.FbxSystemUnit.cm)
             settings.SetTimeMode(fbx.FbxTime.ConvertFrameRateToTimeMode(fps))
             first, last = fbx.FbxTime(), fbx.FbxTime()
             first.SetSecondDouble(-1 / fps if first_pose != "none" else 0.)

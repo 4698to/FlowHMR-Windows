@@ -1,0 +1,1869 @@
+{
+  "skeleton": "MMD",
+  "profile": "vmd",
+  "source": "flowhmr/core/export/vmd.py _rotation_tracks 中的 A-Pose 修正常量；骨骼名取 mmd.json",
+  "pose_source": "models/body_models/smplh/neutral/model.npz（betas=0，中性体型）",
+  "units": "meter",
+  "coordinate_system": "右手系，Y 轴向上，+Z 朝向模型正前方",
+  "rotation_format": "四元数 [w, x, y, z]，相对父骨的局部旋转",
+  "rest_floor_offset_y": 1.161843,
+  "head_top_y": 0.555518,
+  "total_bones": 56,
+  "notes": [
+    "MMD 的绑定姿势来自目标 PMX 模型，仓库不携带模型，因此 bind 为 null。",
+    "T Pose 通道值全为 0；A Pose 只对肩/腕/ひじ/手首施加绕局部 Z 的固定修正。",
+    "a_pose.euler_deg 是每骨相对父骨的局部增量：[肩 26°, 腕 9°, ひじ 5°, 手首 0°]，累计下垂 26°/35°/40°/40°。",
+    "右手骨骼取反号；该数值是 VMD 通道值，已经是父骨坐标系下的相对旋转。",
+    "MMD 为左手系，VMD 没有单位；导出器按 0.08 m/单位换算。"
+  ],
+  "bones": [
+    {
+      "index": 0,
+      "name": "センター",
+      "parent": null,
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 1,
+      "name": "下半身",
+      "parent": "センター",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 2,
+      "name": "上半身",
+      "parent": "センター",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 3,
+      "name": "上半身2",
+      "parent": "上半身",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 4,
+      "name": "首",
+      "parent": "上半身2",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 5,
+      "name": "頭",
+      "parent": "首",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 6,
+      "name": "左足",
+      "parent": "下半身",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 7,
+      "name": "左ひざ",
+      "parent": "左足",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 8,
+      "name": "左足首",
+      "parent": "左ひざ",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 9,
+      "name": "左つま先",
+      "parent": "左足首",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 10,
+      "name": "左足ＩＫ",
+      "parent": null,
+      "type": "control",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 11,
+      "name": "左つま先ＩＫ",
+      "parent": "左足ＩＫ",
+      "type": "control",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 12,
+      "name": "左肩",
+      "parent": "上半身2",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          0.97437,
+          0.0,
+          0.0,
+          0.224951
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          26.0
+        ]
+      }
+    },
+    {
+      "index": 13,
+      "name": "左腕",
+      "parent": "左肩",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          0.996917,
+          0.0,
+          0.0,
+          0.078459
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          9.0
+        ]
+      }
+    },
+    {
+      "index": 14,
+      "name": "左ひじ",
+      "parent": "左腕",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          0.999048,
+          0.0,
+          0.0,
+          0.043619
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          5.0
+        ]
+      }
+    },
+    {
+      "index": 15,
+      "name": "左手首",
+      "parent": "左ひじ",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 16,
+      "name": "左人指１",
+      "parent": "左手首",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 17,
+      "name": "左人指２",
+      "parent": "左人指１",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 18,
+      "name": "左人指３",
+      "parent": "左人指２",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 19,
+      "name": "左中指１",
+      "parent": "左手首",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 20,
+      "name": "左中指２",
+      "parent": "左中指１",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 21,
+      "name": "左中指３",
+      "parent": "左中指２",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 22,
+      "name": "左小指１",
+      "parent": "左手首",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 23,
+      "name": "左小指２",
+      "parent": "左小指１",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 24,
+      "name": "左小指３",
+      "parent": "左小指２",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 25,
+      "name": "左薬指１",
+      "parent": "左手首",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 26,
+      "name": "左薬指２",
+      "parent": "左薬指１",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 27,
+      "name": "左薬指３",
+      "parent": "左薬指２",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 28,
+      "name": "左親指０",
+      "parent": "左手首",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 29,
+      "name": "左親指１",
+      "parent": "左親指０",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 30,
+      "name": "左親指２",
+      "parent": "左親指１",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 31,
+      "name": "右足",
+      "parent": "下半身",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 32,
+      "name": "右ひざ",
+      "parent": "右足",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 33,
+      "name": "右足首",
+      "parent": "右ひざ",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 34,
+      "name": "右つま先",
+      "parent": "右足首",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 35,
+      "name": "右足ＩＫ",
+      "parent": null,
+      "type": "control",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 36,
+      "name": "右つま先ＩＫ",
+      "parent": "右足ＩＫ",
+      "type": "control",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 37,
+      "name": "右肩",
+      "parent": "上半身2",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          0.97437,
+          0.0,
+          0.0,
+          -0.224951
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          -26.0
+        ]
+      }
+    },
+    {
+      "index": 38,
+      "name": "右腕",
+      "parent": "右肩",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          0.996917,
+          0.0,
+          0.0,
+          -0.078459
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          -9.0
+        ]
+      }
+    },
+    {
+      "index": 39,
+      "name": "右ひじ",
+      "parent": "右腕",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          0.999048,
+          0.0,
+          0.0,
+          -0.043619
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          -5.0
+        ]
+      }
+    },
+    {
+      "index": 40,
+      "name": "右手首",
+      "parent": "右ひじ",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 41,
+      "name": "右人指１",
+      "parent": "右手首",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 42,
+      "name": "右人指２",
+      "parent": "右人指１",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 43,
+      "name": "右人指３",
+      "parent": "右人指２",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 44,
+      "name": "右中指１",
+      "parent": "右手首",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 45,
+      "name": "右中指２",
+      "parent": "右中指１",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 46,
+      "name": "右中指３",
+      "parent": "右中指２",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 47,
+      "name": "右小指１",
+      "parent": "右手首",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 48,
+      "name": "右小指２",
+      "parent": "右小指１",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 49,
+      "name": "右小指３",
+      "parent": "右小指２",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 50,
+      "name": "右薬指１",
+      "parent": "右手首",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 51,
+      "name": "右薬指２",
+      "parent": "右薬指１",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 52,
+      "name": "右薬指３",
+      "parent": "右薬指２",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 53,
+      "name": "右親指０",
+      "parent": "右手首",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 54,
+      "name": "右親指１",
+      "parent": "右親指０",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "index": 55,
+      "name": "右親指２",
+      "parent": "右親指１",
+      "type": "joint",
+      "bind": null,
+      "t_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "a_pose": {
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "euler_deg": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    }
+  ]
+}

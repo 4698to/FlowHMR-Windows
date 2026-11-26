@@ -1,24 +1,27 @@
 // Rating gate: the owner must score a finished job before artifacts can be downloaded.
-import { $, el, show } from "./utils.js";
+import { $, show } from "./utils.js";
 import { message as m, setText } from "./i18n.js";
 import * as api from "./api.js";
+import { autoPublish } from "./library.js";
 
-const TAGS = ["quality", "hands", "physics", "camera", "clothing", "other"];
 const DOWNLOADS = ["dlNpz", "dlFbx", "menuNpz"];
+const TAG_SPLIT = /[,，、;；\n]+/;
 
-export function initRating({ onSaved } = {}) {
-  const dialog = $("ratingDialog"), stars = $("ratingStars"), tags = $("ratingTags");
+// Free-form tags for the reference library: split, trim, dedupe, cap at 20 × 32 chars.
+function parseTags(value) {
+  const seen = new Set();
+  for (const raw of value.split(TAG_SPLIT)) {
+    const tag = raw.trim().replace(/\s+/g, " ").slice(0, 32);
+    if (tag) seen.add(tag);
+  }
+  return [...seen].slice(0, 20);
+}
+
+export function initRating({ onSaved, capturePreview, captureMotion } = {}) {
+  const dialog = $("ratingDialog"), stars = $("ratingStars");
+  const tags = $("ratingTags");
   const comment = $("ratingComment"), error = $("ratingError");
   let job = null, score = 0, dirty = false;
-
-  for (const tag of TAGS) {
-    const label = el("label"), box = el("input"), text = el("span");
-    box.type = "checkbox";
-    box.value = tag;
-    setText(text, m(`rating.tag_${tag}`));
-    label.append(box, text);
-    tags.append(label);
-  }
 
   function paintStars() {
     for (const node of stars.children) node.classList.toggle("on", Number(node.dataset.score) <= score);
@@ -29,14 +32,23 @@ export function initRating({ onSaved } = {}) {
     show(error, !!msg);
   }
 
+  // Auto backup: prefer the character FBX baked from the current viewport, then
+  // fall back to the server-generated motion when no character is applied.
+  async function backup(id, preview) {
+    let motion = null;
+    try { motion = await captureMotion?.(); } catch { motion = null; }
+    if (motion?.blob) {
+      try { await api.uploadLibraryMotion(id, motion.blob, motion.filename); } catch { /* fall back */ }
+    }
+    await autoPublish(id, preview);
+  }
+
   function open() {
     if (!job || job.status !== "done") return;
     const rating = job.rating || {};
     score = rating.score || 0;
+    tags.value = (rating.tags || []).join(", ");
     comment.value = rating.comment || "";
-    for (const box of tags.querySelectorAll("input")) {
-      box.checked = (rating.tags || []).includes(box.value);
-    }
     dirty = false;
     paintStars();
     setError("");
@@ -49,18 +61,18 @@ export function initRating({ onSaved } = {}) {
       setError(m("rating.score_required"));
       return;
     }
-    const selected = [...tags.querySelectorAll("input:checked")].map((box) => box.value);
     const button = $("ratingSubmit");
     button.disabled = true;
     try {
       await api.saveRating(job.id, {
         score,
-        tags: selected,
+        tags: parseTags(tags.value),
         comment: comment.value.trim(),
-        allow_library: true,
       });
       dirty = true;
+      const preview = capturePreview?.();
       dialog.close();
+      void backup(job.id, preview);
       onSaved?.(job.id);
     } catch (err) {
       setError(err.message ? err : m("rating.save_failed"));

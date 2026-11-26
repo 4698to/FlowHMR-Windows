@@ -306,7 +306,21 @@ export function initMotionExport(getBodyVariant, viewer) {
     }
   });
 
+  // Bake the retargeted character (with its skin) for the reference-library backup.
+  async function bakePublishFbx() {
+    if (!result) return null;
+    const focused = viewer.focusedPerson;
+    const people = Number.isInteger(focused) ? [String(focused)] : selected().slice(0, 1);
+    if (!people.length) return null;
+    const actor = viewer.getFbxActor(people, "retarget_fbx");
+    if (!actor?.poseOffsets?.retarget) return null;
+    const { bakeTargetFbx } = await import("./retarget-fbx.js");
+    const baked = await bakeTargetFbx(actor, new AbortController().signal, "retarget_fbx");
+    return api.exportTargetFbx(result.id, people, "retarget_fbx", actor, baked, true);
+  }
+
   return {
+    bakePublishFbx,
     setResult(id, job) {
       result = { id, filename: job.filename, cameraAvailable: cameraAvailable(cameraStatusForJob(job)) };
       includeCamera.checked = false;

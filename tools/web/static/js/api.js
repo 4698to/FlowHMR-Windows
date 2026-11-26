@@ -40,6 +40,13 @@ export const getMe = () => json("/api/me", { cache: "no-store" });
 export const saveName = (name) => json("/api/me", {
   method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }),
 });
+export const getAuthStatus = () => json("/api/auth/status", { cache: "no-store" });
+export const logout = () => json("/api/auth/logout", {
+  method: "POST", headers: { "X-FlowHMR-Auth": "1" },
+});
+export const claimJobs = () => json("/api/auth/claim", {
+  method: "POST", headers: { "X-FlowHMR-Auth": "1" },
+});
 export const getModelDownload = () => json("/api/models/download", { cache: "no-store" });
 export const startModelDownload = (group) => postJson("/api/models/download", group ? { group } : {});
 export const stopModelDownload = (id) => postJson("/api/models/download/stop", { id });
@@ -213,8 +220,24 @@ export async function exportTargetFbx(id, people, profile, actor, { paths, sampl
   }
   return { filename, blob: await response.blob() };
 }
+export async function uploadLibraryMotion(id, blob, filename = "motion.fbx") {
+  const body = new FormData();
+  body.append("file", blob, filename);
+  return json(`/api/jobs/${id}/library-motion`, { method: "POST", body });
+}
 export const personThumbUrl = (id, i) => `/api/jobs/${id}/person/${i}.jpg`;
 export const thumbnailUrl = (id) => `/api/jobs/${id}/thumbnail.jpg`;
+
+// Public reference library (browse / publish).
+export const getLibraryConfig = () => json("/api/library/config", { cache: "no-store" });
+export const getLibraryResources = (params = {}, signal) => json(
+  `/api/library/resources?${new URLSearchParams(params)}`, { cache: "no-store", signal });
+export const getLibraryResource = (id, signal) => json(
+  `/api/library/resources/${encodeURIComponent(id)}`, { cache: "no-store", signal });
+export const getLibraryLinks = (ids, signal) => postJson(
+  "/api/library/resources/links", { resource_ids: ids.map(String) }, signal);
+export const libraryFileUrl = (id, kind) => `/api/library/resources/${encodeURIComponent(id)}/file?kind=${kind}`;
+export const publishLibraryJob = (body) => postJson("/api/library/publish", body);
 
 /** Upload a video with per-job parameters. Resolves to the new job id. */
 export function uploadVideo(file, params, onProgress) {

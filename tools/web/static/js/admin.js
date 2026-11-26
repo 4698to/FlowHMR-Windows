@@ -490,9 +490,21 @@ async function loadUsers() {
     nameInput.value = user.name || '';
     nameInput.maxLength = 24;
     nameInput.style.width = '130px';
+    if (user.platform) {
+      nameInput.readOnly = true;
+      nameInput.title = '昵称由参考库平台管理';
+    }
     nameTd.append(nameInput);
     tr.append(nameTd);
     tr.append(el('td', 'muted', user.uid));
+    tr.append(el('td', '', user.platform ? (user.code || '—') : '本地'));
+    const rolesTd = el('td');
+    if (user.platform) {
+      rolesTd.textContent = (user.roles || []).join('、') || '—';
+    } else {
+      rolesTd.append(el('span', 'muted', '—'));
+    }
+    tr.append(rolesTd);
     const ipTd = el('td');
     ipTd.append(el('div', '', user.last_ip || '—'));
     if (user.shared_ips && user.shared_ips.length) {
@@ -511,9 +523,14 @@ async function loadUsers() {
     tr.append(statusTd);
     const actions = el('td', 'actions-col');
     const wrap = el('div', 'row-actions');
-    wrap.append(button('保存昵称', 'mini ghost', () => updateUser(user.uid, { name: nameInput.value })));
+    if (!user.platform) {
+      wrap.append(button('保存昵称', 'mini ghost', () => updateUser(user.uid, { name: nameInput.value })));
+    }
     wrap.append(button(user.disabled ? '启用' : '禁用', `mini ghost ${user.disabled ? '' : 'danger'}`,
       () => toggleUserDisabled(user)));
+    if (user.platform) {
+      wrap.append(button('强制下线', 'mini ghost danger', () => forceLogout(user)));
+    }
     actions.append(wrap);
     tr.append(actions);
     body.append(tr);
@@ -540,6 +557,22 @@ async function toggleUserDisabled(user) {
     if (!ok) return;
   }
   await updateUser(user.uid, { disabled: !user.disabled });
+}
+
+async function forceLogout(user) {
+  const ok = await confirmDanger({
+    title: '强制下线',
+    message: `将立即注销「${user.name || user.uid}」在所有浏览器上的登录会话；小程序端不受影响。`,
+    okText: '强制下线',
+  });
+  if (!ok) return;
+  try {
+    const result = await post(`/api/admin/users/${encodeURIComponent(user.uid)}/logout`);
+    toast(`已注销 ${result.sessions || 0} 个会话`);
+    await loadUsers();
+  } catch (error) {
+    showError(error);
+  }
 }
 
 /* ------------------------------------------------------------------ storage */
@@ -668,7 +701,7 @@ function openDrawer(job) {
     ['排队位置', job.queue_position || '—'],
     ['评分', job.rating && job.rating.score ? `${job.rating.score} / 5` : '未评分'],
     ['评分标签', (job.rating && job.rating.tags || []).map((tag) => RATING_TAGS[tag] || tag).join('、') || '—'],
-    ['评语', (job.rating && job.rating.comment) || '—'],
+    ['备注', (job.rating && job.rating.comment) || '—'],
   ];
   for (const [key, value] of rows) {
     kv.append(el('dt', '', key));

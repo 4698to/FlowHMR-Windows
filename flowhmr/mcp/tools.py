@@ -66,7 +66,7 @@ def build_tools(backend, exports):
         explicit waits for flowhmr_select_people; automatic authorizes the default person.
         Query flowhmr_get_job for progress. Do not resubmit on an uncertain transport outcome.
         """
-        path = local_file(video_path, {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'})
+        path = local_file(video_path, {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.gif', '.webp'})
         if not 0 < path.stat().st_size <= 1024 ** 3:
             fail('video_size', 'Video must be nonempty and no larger than 1 GiB.')
         settings = params.model_dump(exclude_unset=True) if params else {}

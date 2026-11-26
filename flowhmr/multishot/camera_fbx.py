@@ -1,4 +1,4 @@
-"""Separate Y-up/metre camera FBX using the application's installed FBX SDK."""
+"""Separate Y-up/centimetre camera FBX using the application's installed FBX SDK."""
 import numpy as np
 from scipy.spatial.transform import Rotation
 
@@ -12,7 +12,9 @@ def export_camera_fbx(data, path):
         raise ValueError('No valid camera frames')
     h, w = map(int, data.image_size_hw)
     hold = np.r_[~data.camera_valid[1:] | (data.shot_ids[1:] != data.shot_ids[:-1]), False]
-    centers = data.centers
+    # The paired character FBX is centimetre-based, so the camera must match.
+    scale = 100.
+    centers = data.centers * scale
     ry90 = np.array([[0., 0., 1.], [0., 1., 0.], [-1., 0., 0.]])
     matrices = np.tile(np.eye(3), (len(data.RT), 1, 1))
     matrices[indices] = data.RT[indices, :3, :3].transpose(0, 2, 1) @ np.diag([1., -1., -1.]) @ ry90
@@ -28,8 +30,8 @@ def export_camera_fbx(data, path):
         scene = fbx.FbxScene.Create(manager, 'Paired camera')
         settings = scene.GetGlobalSettings()
         settings.SetAxisSystem(fbx.FbxAxisSystem.MayaYUp)
-        settings.SetSystemUnit(fbx.FbxSystemUnit.m)
-        settings.SetOriginalSystemUnit(fbx.FbxSystemUnit.m)
+        settings.SetSystemUnit(fbx.FbxSystemUnit.cm)
+        settings.SetOriginalSystemUnit(fbx.FbxSystemUnit.cm)
         settings.SetTimeMode(fbx.FbxTime.ConvertFrameRateToTimeMode(data.fps))
         start, stop = fbx.FbxTime(), fbx.FbxTime()
         start.SetSecondDouble(data.track_start / data.fps)
@@ -51,8 +53,8 @@ def export_camera_fbx(data, path):
         camera.FilmWidth.Set(36 / 25.4)
         camera.FilmHeight.Set(36 / 25.4)
         camera.GateFit.Set((fbx.FbxCamera.EGateFit.eFitVertical if h > w else fbx.FbxCamera.EGateFit.eFitHorizontal).value)
-        camera.NearPlane.Set(.01)
-        camera.FarPlane.Set(10000.)
+        camera.NearPlane.Set(.01 * scale)
+        camera.FarPlane.Set(10000. * scale)
         curves = [(node.LclTranslation.GetCurve(layer, axis, True), centers[:, i]) for i, axis in enumerate('XYZ')]
         curves += [(node.LclRotation.GetCurve(layer, axis, True), angles[:, i]) for i, axis in enumerate('XYZ')]
         curves += [(camera.FocalLength.GetCurve(layer, True), focal)]

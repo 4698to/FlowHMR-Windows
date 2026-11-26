@@ -1,0 +1,379 @@
+{
+  "skeleton": "SMPL-H",
+  "profile": "smplh",
+  "source": "flowhmr/mcp/joint_names.py SMPLH_JOINT_NAMES_52；flowhmr/core/export/fbx_utils.py SMPLH_JOINT2NUM",
+  "total_bones": 52,
+  "notes": [
+    "name 为 SMPL-H 模型原生关节名（下划线小写），也是 /api/info 与 MCP 中使用的顺序。",
+    "fbx_name 为 FBX 导出工具中的 Maya 风格别名，仅作显示/兼容用。",
+    "没有末端 tip 骨，也没有 Root 骨；pelvis 即根骨。",
+    "导出为 FlowHMR 混合蒙皮 FBX 时会重命名为 docs/bone-names/flowhmr.json 中的 iClone 风格名称（如 left_hip -> LeftUpLeg、spine3 -> Spine2）。",
+    "52 个关节 = 22 个身体关节 + 30 个手部关节，不含 jaw / eyes。"
+  ],
+  "bones": [
+    {
+      "index": 0,
+      "name": "pelvis",
+      "fbx_name": "Pelvis",
+      "parent": null,
+      "type": "joint"
+    },
+    {
+      "index": 1,
+      "name": "left_hip",
+      "fbx_name": "L_Hip",
+      "parent": "pelvis",
+      "type": "joint"
+    },
+    {
+      "index": 2,
+      "name": "right_hip",
+      "fbx_name": "R_Hip",
+      "parent": "pelvis",
+      "type": "joint"
+    },
+    {
+      "index": 3,
+      "name": "spine1",
+      "fbx_name": "Spine1",
+      "parent": "pelvis",
+      "type": "joint"
+    },
+    {
+      "index": 4,
+      "name": "left_knee",
+      "fbx_name": "L_Knee",
+      "parent": "left_hip",
+      "type": "joint"
+    },
+    {
+      "index": 5,
+      "name": "right_knee",
+      "fbx_name": "R_Knee",
+      "parent": "right_hip",
+      "type": "joint"
+    },
+    {
+      "index": 6,
+      "name": "spine2",
+      "fbx_name": "Spine2",
+      "parent": "spine1",
+      "type": "joint"
+    },
+    {
+      "index": 7,
+      "name": "left_ankle",
+      "fbx_name": "L_Ankle",
+      "parent": "left_knee",
+      "type": "joint"
+    },
+    {
+      "index": 8,
+      "name": "right_ankle",
+      "fbx_name": "R_Ankle",
+      "parent": "right_knee",
+      "type": "joint"
+    },
+    {
+      "index": 9,
+      "name": "spine3",
+      "fbx_name": "Spine3",
+      "parent": "spine2",
+      "type": "joint"
+    },
+    {
+      "index": 10,
+      "name": "left_foot",
+      "fbx_name": "L_Foot",
+      "parent": "left_ankle",
+      "type": "joint"
+    },
+    {
+      "index": 11,
+      "name": "right_foot",
+      "fbx_name": "R_Foot",
+      "parent": "right_ankle",
+      "type": "joint"
+    },
+    {
+      "index": 12,
+      "name": "neck",
+      "fbx_name": "Neck",
+      "parent": "spine3",
+      "type": "joint"
+    },
+    {
+      "index": 13,
+      "name": "left_collar",
+      "fbx_name": "L_Collar",
+      "parent": "spine3",
+      "type": "joint"
+    },
+    {
+      "index": 14,
+      "name": "right_collar",
+      "fbx_name": "R_Collar",
+      "parent": "spine3",
+      "type": "joint"
+    },
+    {
+      "index": 15,
+      "name": "head",
+      "fbx_name": "Head",
+      "parent": "neck",
+      "type": "joint"
+    },
+    {
+      "index": 16,
+      "name": "left_shoulder",
+      "fbx_name": "L_Shoulder",
+      "parent": "left_collar",
+      "type": "joint"
+    },
+    {
+      "index": 17,
+      "name": "right_shoulder",
+      "fbx_name": "R_Shoulder",
+      "parent": "right_collar",
+      "type": "joint"
+    },
+    {
+      "index": 18,
+      "name": "left_elbow",
+      "fbx_name": "L_Elbow",
+      "parent": "left_shoulder",
+      "type": "joint"
+    },
+    {
+      "index": 19,
+      "name": "right_elbow",
+      "fbx_name": "R_Elbow",
+      "parent": "right_shoulder",
+      "type": "joint"
+    },
+    {
+      "index": 20,
+      "name": "left_wrist",
+      "fbx_name": "L_Wrist",
+      "parent": "left_elbow",
+      "type": "joint"
+    },
+    {
+      "index": 21,
+      "name": "right_wrist",
+      "fbx_name": "R_Wrist",
+      "parent": "right_elbow",
+      "type": "joint"
+    },
+    {
+      "index": 22,
+      "name": "left_index1",
+      "fbx_name": "L_Index1",
+      "parent": "left_wrist",
+      "type": "joint"
+    },
+    {
+      "index": 23,
+      "name": "left_index2",
+      "fbx_name": "L_Index2",
+      "parent": "left_index1",
+      "type": "joint"
+    },
+    {
+      "index": 24,
+      "name": "left_index3",
+      "fbx_name": "L_Index3",
+      "parent": "left_index2",
+      "type": "joint"
+    },
+    {
+      "index": 25,
+      "name": "left_middle1",
+      "fbx_name": "L_Middle1",
+      "parent": "left_wrist",
+      "type": "joint"
+    },
+    {
+      "index": 26,
+      "name": "left_middle2",
+      "fbx_name": "L_Middle2",
+      "parent": "left_middle1",
+      "type": "joint"
+    },
+    {
+      "index": 27,
+      "name": "left_middle3",
+      "fbx_name": "L_Middle3",
+      "parent": "left_middle2",
+      "type": "joint"
+    },
+    {
+      "index": 28,
+      "name": "left_pinky1",
+      "fbx_name": "L_Pinky1",
+      "parent": "left_wrist",
+      "type": "joint"
+    },
+    {
+      "index": 29,
+      "name": "left_pinky2",
+      "fbx_name": "L_Pinky2",
+      "parent": "left_pinky1",
+      "type": "joint"
+    },
+    {
+      "index": 30,
+      "name": "left_pinky3",
+      "fbx_name": "L_Pinky3",
+      "parent": "left_pinky2",
+      "type": "joint"
+    },
+    {
+      "index": 31,
+      "name": "left_ring1",
+      "fbx_name": "L_Ring1",
+      "parent": "left_wrist",
+      "type": "joint"
+    },
+    {
+      "index": 32,
+      "name": "left_ring2",
+      "fbx_name": "L_Ring2",
+      "parent": "left_ring1",
+      "type": "joint"
+    },
+    {
+      "index": 33,
+      "name": "left_ring3",
+      "fbx_name": "L_Ring3",
+      "parent": "left_ring2",
+      "type": "joint"
+    },
+    {
+      "index": 34,
+      "name": "left_thumb1",
+      "fbx_name": "L_Thumb1",
+      "parent": "left_wrist",
+      "type": "joint"
+    },
+    {
+      "index": 35,
+      "name": "left_thumb2",
+      "fbx_name": "L_Thumb2",
+      "parent": "left_thumb1",
+      "type": "joint"
+    },
+    {
+      "index": 36,
+      "name": "left_thumb3",
+      "fbx_name": "L_Thumb3",
+      "parent": "left_thumb2",
+      "type": "joint"
+    },
+    {
+      "index": 37,
+      "name": "right_index1",
+      "fbx_name": "R_Index1",
+      "parent": "right_wrist",
+      "type": "joint"
+    },
+    {
+      "index": 38,
+      "name": "right_index2",
+      "fbx_name": "R_Index2",
+      "parent": "right_index1",
+      "type": "joint"
+    },
+    {
+      "index": 39,
+      "name": "right_index3",
+      "fbx_name": "R_Index3",
+      "parent": "right_index2",
+      "type": "joint"
+    },
+    {
+      "index": 40,
+      "name": "right_middle1",
+      "fbx_name": "R_Middle1",
+      "parent": "right_wrist",
+      "type": "joint"
+    },
+    {
+      "index": 41,
+      "name": "right_middle2",
+      "fbx_name": "R_Middle2",
+      "parent": "right_middle1",
+      "type": "joint"
+    },
+    {
+      "index": 42,
+      "name": "right_middle3",
+      "fbx_name": "R_Middle3",
+      "parent": "right_middle2",
+      "type": "joint"
+    },
+    {
+      "index": 43,
+      "name": "right_pinky1",
+      "fbx_name": "R_Pinky1",
+      "parent": "right_wrist",
+      "type": "joint"
+    },
+    {
+      "index": 44,
+      "name": "right_pinky2",
+      "fbx_name": "R_Pinky2",
+      "parent": "right_pinky1",
+      "type": "joint"
+    },
+    {
+      "index": 45,
+      "name": "right_pinky3",
+      "fbx_name": "R_Pinky3",
+      "parent": "right_pinky2",
+      "type": "joint"
+    },
+    {
+      "index": 46,
+      "name": "right_ring1",
+      "fbx_name": "R_Ring1",
+      "parent": "right_wrist",
+      "type": "joint"
+    },
+    {
+      "index": 47,
+      "name": "right_ring2",
+      "fbx_name": "R_Ring2",
+      "parent": "right_ring1",
+      "type": "joint"
+    },
+    {
+      "index": 48,
+      "name": "right_ring3",
+      "fbx_name": "R_Ring3",
+      "parent": "right_ring2",
+      "type": "joint"
+    },
+    {
+      "index": 49,
+      "name": "right_thumb1",
+      "fbx_name": "R_Thumb1",
+      "parent": "right_wrist",
+      "type": "joint"
+    },
+    {
+      "index": 50,
+      "name": "right_thumb2",
+      "fbx_name": "R_Thumb2",
+      "parent": "right_thumb1",
+      "type": "joint"
+    },
+    {
+      "index": 51,
+      "name": "right_thumb3",
+      "fbx_name": "R_Thumb3",
+      "parent": "right_thumb2",
+      "type": "joint"
+    }
+  ]
+}

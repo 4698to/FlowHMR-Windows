@@ -67,6 +67,9 @@ __pycache__/
 .idea/
 .DS_Store
 
+# reference library app credentials (keep the secret out of git)
+/tools/web/auth_config.json
+
 # optional runtime components (installed on demand, never shipped in the portable ZIP)
 /third_party/sam2/
 /third_party/sam2_runtime/

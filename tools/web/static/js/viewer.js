@@ -1233,7 +1233,24 @@ export function initViewer(preview) {
     }
   });
 
+  // Grab the current 3D viewport for the reference-library preview image.
+  function captureViewport(maxWidth = 1280) {
+    if (sourceView || !state.meta || state.frame < 0) return null;
+    const width = container.clientWidth, height = container.clientHeight;
+    if (!width || !height) return null;
+    renderer.setScissorTest(false);
+    renderer.setViewport(0, 0, width, height);
+    renderer.render(scene, camera);
+    const scale = Math.min(1, maxWidth / width);
+    const shot = document.createElement("canvas");
+    shot.width = Math.max(1, Math.round(width * scale));
+    shot.height = Math.max(1, Math.round(height * scale));
+    shot.getContext("2d").drawImage(renderer.domElement, 0, 0, shot.width, shot.height);
+    return shot.toDataURL("image/jpeg", 0.9);
+  }
+
   return {
+    captureViewport,
     controlPlayback(command) {
       if (!state.meta || state.frame < 0) return { error: 'No motion is loaded in this viewer.' };
       if (state.jobId !== command.job_id) return { error: 'The viewer is displaying a different job.' };

@@ -2,6 +2,7 @@ import os
 import os.path as osp
 import shutil
 import subprocess
+import tempfile
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -18,6 +19,9 @@ from flowhmr.utils.runtime_capabilities import detection_request_key
 
 # Repo root (for locating checkpoints)
 _repo_root = osp.normpath(osp.join(osp.dirname(__file__), "..", ".."))
+
+# ffmpeg executable -> whether it can decode animated WebP natively.
+_WEBP_ANIM_SUPPORT: Dict[str, bool] = {}
 
 
 def _ffmpeg_override() -> Optional[str]:
@@ -67,6 +71,71 @@ def find_ffmpeg() -> str:
     raise RuntimeError(
         "ffmpeg not found: reinstall the bundled imageio-ffmpeg binary "
         "(`pip install imageio-ffmpeg`), install ffmpeg system-wide, or set $FFMPEG")
+
+
+def _reads_animated_webp(ffmpeg_exe: str) -> bool:
+    """True when this FFmpeg build ships the native animated-WebP decoder (9.0+)."""
+    cached = _WEBP_ANIM_SUPPORT.get(ffmpeg_exe)
+    if cached is None:
+        try:
+            listing = subprocess.run([ffmpeg_exe, "-hide_banner", "-decoders"],
+                                     capture_output=True, text=True, timeout=30).stdout
+            # Decoder rows look like " V.S..D webp_anim   Animated WebP image".
+            cached = any(len(parts := line.split()) >= 2 and parts[0].startswith("V")
+                         and parts[1] == "webp_anim" for line in listing.splitlines())
+        except (OSError, subprocess.SubprocessError):
+            cached = False
+        _WEBP_ANIM_SUPPORT[ffmpeg_exe] = cached
+    return cached
+
+
+def animated_webp_concat(path: str, ffmpeg_exe: str, start_time: float = 0.0) -> Optional[Tuple[str, str]]:
+    """Split an animated WebP into PNG frames plus a concat list for FFmpeg.
+
+    FFmpeg 7 only decodes still WebP ("skipping unsupported chunk: ANIM"), so animated
+    files are unpacked with Pillow and re-timed by their frame durations. FFmpeg 9 has
+    the native webp_anim decoder, but seeking it with -ss yields an empty file, so any
+    trimmed request still goes through Pillow. Returns ``(list_path, work_dir)``; the
+    caller owns ``work_dir`` and must remove it. Returns None when FFmpeg can read the
+    file itself or it is not an animated WebP.
+    """
+    if osp.splitext(path)[1].lower() != ".webp":
+        return None
+    if start_time <= 0 and _reads_animated_webp(ffmpeg_exe):
+        return None
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        image = Image.open(path)
+    except Exception:
+        return None
+    work_dir = None
+    try:
+        if not getattr(image, "is_animated", False) or getattr(image, "n_frames", 1) <= 1:
+            return None
+        work_dir = tempfile.mkdtemp(prefix="flowhmr_webp_")
+        entries = []
+        for index in range(image.n_frames):
+            image.seek(index)
+            name = f"{index:06d}.png"
+            image.convert("RGB").save(osp.join(work_dir, name))
+            # WebP stores milliseconds; clamp like browsers do so no frame collapses.
+            delay = max(int(image.info.get("duration") or 0), 20) / 1000.0
+            entries.append(f"file '{name}'\nduration {delay:.3f}\n")
+        # The concat demuxer ignores the last duration unless its file repeats.
+        entries.append(f"file '{image.n_frames - 1:06d}.png'\n")
+        list_path = osp.join(work_dir, "frames.txt")
+        with open(list_path, "w", encoding="utf-8") as handle:
+            handle.writelines(entries)
+        return list_path, work_dir
+    except Exception:
+        if work_dir:
+            shutil.rmtree(work_dir, ignore_errors=True)
+        return None
+    finally:
+        image.close()
 
 
 # Type definitions
@@ -276,18 +345,28 @@ class VideoProcessor:
             return backup_path
 
         ffmpeg_exe = find_ffmpeg()
+        # Animated WebP is unreadable by FFmpeg 7; feed it a PNG sequence instead.
+        webp_frames = animated_webp_concat(video_path, ffmpeg_exe, start_time)
+        source_args = ["-f", "concat", "-safe", "0", "-i", webp_frames[0]] if webp_frames else ["-i", video_path]
         # Write to a temp file and rename when done, so a reader (e.g. the web demo serving
         # this file) never sees a half-written mp4.
         tmp_path = osp.join(backup_dir, f"{cache_base}.part.mp4")
 
         def build_cmd(encoder_name: Optional[str]) -> List[str]:
-            cmd = [ffmpeg_exe, "-y", "-ss", str(start_time), "-i", video_path]
+            cmd = [ffmpeg_exe, "-y"]
+            if start_time > 0:
+                # Seeking an animated WebP in FFmpeg 9 silently produces an empty file,
+                # so only seek real videos; 0 is a no-op anyway.
+                cmd += ["-ss", str(start_time)]
+            cmd += source_args
             if duration is not None:
                 cmd += ["-t", str(duration)]
             if force_fps and encoder_name:
                 # FFmpeg 9 removed -vsync; -fps_mode cfr expresses the same constant
-                # frame-rate behavior for filtered output.
-                cmd += ["-vf", f"fps={int(force_fps)}", "-c:v", encoder_name, "-fps_mode", "cfr", "-pix_fmt", "yuv420p"]
+                # frame-rate behavior for filtered output. GIF/WebP often have odd
+                # dimensions, which yuv420p encoders reject, so round down to even.
+                cmd += ["-vf", f"fps={int(force_fps)},scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                        "-c:v", encoder_name, "-fps_mode", "cfr", "-pix_fmt", "yuv420p"]
                 if "libx264" in encoder_name or "libx265" in encoder_name:
                     cmd += ["-preset", "fast", "-crf", "22"]
                 elif "nvenc" in encoder_name:
@@ -306,24 +385,28 @@ class VideoProcessor:
             candidate_encoders = [None]
 
         last_error = ""
-        for enc in candidate_encoders:
-            cmd = build_cmd(enc)
-            try:
-                subprocess.run(cmd, check=True, capture_output=True, text=True)
-                os.replace(tmp_path, backup_path)
-                print(f">>> video transcoding done (using {ffmpeg_exe}, "
-                      f"encoder: {enc if enc else 'copy'}): {backup_path}")
-                return backup_path
-            except subprocess.CalledProcessError as e:
-                err_msg = e.stderr.strip() if e.stderr else str(e)
-                last_error = err_msg
-                continue
+        try:
+            for enc in candidate_encoders:
+                cmd = build_cmd(enc)
+                try:
+                    subprocess.run(cmd, check=True, capture_output=True, text=True)
+                    os.replace(tmp_path, backup_path)
+                    print(f">>> video transcoding done (using {ffmpeg_exe}, "
+                          f"encoder: {enc if enc else 'copy'}): {backup_path}")
+                    return backup_path
+                except subprocess.CalledProcessError as e:
+                    err_msg = e.stderr.strip() if e.stderr else str(e)
+                    last_error = err_msg
+                    continue
 
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        raise RuntimeError(
-            f"FFmpeg transcoding FAILED (using {ffmpeg_exe}; "
-            f"tried encoders: {candidate_encoders}): {last_error}")
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise RuntimeError(
+                f"FFmpeg transcoding FAILED (using {ffmpeg_exe}; "
+                f"tried encoders: {candidate_encoders}): {last_error}")
+        finally:
+            if webp_frames:
+                shutil.rmtree(webp_frames[1], ignore_errors=True)
 
     # Detect + Track
     def detect_and_track(

@@ -1,6 +1,6 @@
 // Page controller: wires the cards together and polls the current job.
 import { $, show, createBus, jobLabel } from "./utils.js";
-import { appError, message as m, setText, setupLocalization } from "./i18n.js";
+import { appError, localize, message as m, setText, setupLocalization } from "./i18n.js";
 import * as api from "./api.js";
 import { initUpload } from "./upload.js";
 import { initParams } from "./params.js";
@@ -18,6 +18,7 @@ import { initUpdates } from "./update.js";
 import { initMcpDialog } from "./mcp.js";
 import { initUIEvents } from './ui-events.js';
 import { initRating } from "./rating.js";
+import { initLibrary } from "./library.js";
 
 setupLocalization();
 initMcpDialog();
@@ -53,6 +54,7 @@ initLayout();
 let info = null;
 let currentJob = null;
 let currentUser = null;
+let auth = null;
 let lastJobKey = "flowhmr-last-job";
 let loadedResult = null;
 let paramsShownFor = null;
@@ -101,7 +103,10 @@ window.addEventListener('flowhmr:server-update', event => {
 const motionExport = initMotionExport(() => viewer.bodyVariant, viewer);
 const trim = initTrim({ ...preview, seek: viewer.seekSourceFrame });
 const history = initHistory({ onOpen: (id) => openJob(id, { focus: true }), onRerun: rerun, onDeleted: clearDeletedJobs, onUpdated: syncExternalJobs });
-const rating = initRating({ onSaved: () => { void poll(); void history.refresh(); } });
+const rating = initRating({ onSaved: () => { void poll(); void history.refresh(); },
+  capturePreview: () => viewer.captureViewport(),
+  captureMotion: () => motionExport.bakePublishFbx() });
+const library = initLibrary();
 const runtime = initRuntimeDialog();
 let params = null;
 
@@ -156,6 +161,63 @@ async function editUserName() {
   }
 }
 
+const AUTH_ERROR_KEYS = {
+  denied: "auth.error_denied",
+  state_invalid: "auth.error_state_invalid",
+  exchange_failed: "auth.error_exchange_failed",
+  role_required: "auth.error_role_required",
+  scope_missing: "auth.error_scope_missing",
+};
+
+function authGate() {
+  const dialog = $("authDialog");
+  const errorCode = new URLSearchParams(location.search).get("auth_error");
+  if (errorCode) {
+    const node = $("authError");
+    node.textContent = localize(m(AUTH_ERROR_KEYS[errorCode] || "auth.error_exchange_failed"));
+    show(node, true);
+    history.replaceState(null, "", location.pathname);
+  }
+  $("authLogin").addEventListener("click", () => {
+    const next = location.pathname + location.search;
+    location.href = `/api/auth/login?next=${encodeURIComponent(next)}`;
+  });
+  dialog.addEventListener("cancel", (event) => event.preventDefault());
+  if (!dialog.open) dialog.showModal();
+}
+
+function accountMenu() {
+  const dialog = $("accountDialog");
+  $("accountName").value = auth.user?.name || currentUser?.name || "";
+  $("accountCode").value = auth.user?.code || "";
+  $("accountRoles").value = (auth.roles || []).join(", ");
+  $("btnUser").addEventListener("click", () => dialog.showModal());
+  $("accountLogout").addEventListener("click", async () => {
+    $("accountLogout").disabled = true;
+    try { await api.logout(); } catch { /* clear the local session anyway */ }
+    location.href = "/";
+  });
+}
+
+function loginEntry() {
+  $("btnUser").title = localize(m("auth.title"));
+  $("btnUser").addEventListener("click", () => {
+    const next = location.pathname + location.search;
+    location.href = `/api/auth/login?next=${encodeURIComponent(next)}`;
+  });
+}
+
+async function claimLegacyJobs() {
+  const status = await api.getAuthStatus().catch(() => null);
+  if (!status?.claimable) return;
+  if (!window.confirm(localize(m("auth.claim_prompt", { count: status.claimable })))) return;
+  try {
+    await api.claimJobs();
+  } catch (error) {
+    progress.showActionError(error.message || localize(m("auth.claim_failed")));
+  }
+}
+
 // ------------------------------------------------------------------ boot
 const me = await api.getMe().catch(() => null);
 if (me) {
@@ -164,41 +226,50 @@ if (me) {
   setText($("userName"), me.name);
   $("btnUser").title = `${me.name} · ${me.ip}`;
 }
-$("btnUser").addEventListener("click", editUserName);
-try {
-  applyModelInfo(await api.getInfo());
-  setText($("uploadHint"), m("source.size_limit", { max: info.max_upload_mb }));
-} catch {
-  applyModelInfo(null);
-}
-if (info?.postprocess_available === false) {
-  $("optPostprocess").disabled = true;
-  setText($("postprocessHint"), m("correction.unavailable"));
-}
-params = initParams(info?.defaults ?? {}, info?.sam_manual_default ?? 24,
-  !!info?.sam_hybrid_available, !!info?.camera_on_cpu_for_amd_igpu);
-if (info?.runtime?.supported) runtime.restore();
-const jobs = (await history.refresh()) ?? [];
-const savedJob = localStorage.getItem(lastJobKey);
-let initialJob = jobs.find((job) => job.status === "waiting_user" || job.status === "running")
-  ?? jobs.find((job) => ACTIVE.has(job.status))
-  ?? jobs.find((job) => job.id === savedJob);
-if (!initialJob && savedJob) {
+auth = me?.auth || { mode: "local", logged_in: false };
+const needsLogin = auth.mode === "reference" && !auth.logged_in;
+if (needsLogin) {
+  authGate();
+} else {
+  if (auth.mode === "local") $("btnUser").addEventListener("click", editUserName);
+  else if (auth.logged_in) accountMenu();
+  else loginEntry();
+  if (auth.logged_in) await claimLegacyJobs();
   try {
-    const job = await api.getJob(savedJob);
-    if (ownsJob(job)) initialJob = job;
-  } catch { /* job may have been deleted */ }
+    applyModelInfo(await api.getInfo());
+    setText($("uploadHint"), m("source.size_limit", { max: info.max_upload_mb }));
+  } catch {
+    applyModelInfo(null);
+  }
+  if (info?.postprocess_available === false) {
+    $("optPostprocess").disabled = true;
+    setText($("postprocessHint"), m("correction.unavailable"));
+  }
+  params = initParams(info?.defaults ?? {}, info?.sam_manual_default ?? 24,
+    !!info?.sam_hybrid_available, !!info?.camera_on_cpu_for_amd_igpu);
+  if (info?.runtime?.supported) runtime.restore();
+  const jobs = (await history.refresh()) ?? [];
+  const savedJob = localStorage.getItem(lastJobKey);
+  let initialJob = jobs.find((job) => job.status === "waiting_user" || job.status === "running")
+    ?? jobs.find((job) => ACTIVE.has(job.status))
+    ?? jobs.find((job) => job.id === savedJob);
+  if (!initialJob && savedJob) {
+    try {
+      const job = await api.getJob(savedJob);
+      if (ownsJob(job)) initialJob = job;
+    } catch { /* job may have been deleted */ }
+  }
+  initialJob ??= jobs.find((job) => job.status === "done") ?? jobs[0];
+  // Admin deep link: /?job=<id> opens any task, ownership is enforced by the server.
+  const requestedJob = new URLSearchParams(location.search).get("job");
+  if (requestedJob) {
+    try { initialJob = await api.getJob(requestedJob); } catch { /* keep own history fallback */ }
+  }
+  if (initialJob) void openJob(initialJob.id, { restoreDraft: true });
+  syncSubmit();
+  if (info) confirmWorkspaceReady();
+  initUIEvents();
 }
-initialJob ??= jobs.find((job) => job.status === "done") ?? jobs[0];
-// Admin deep link: /?job=<id> opens any task, ownership is enforced by the server.
-const requestedJob = new URLSearchParams(location.search).get("job");
-if (requestedJob) {
-  try { initialJob = await api.getJob(requestedJob); } catch { /* keep own history fallback */ }
-}
-if (initialJob) void openJob(initialJob.id, { restoreDraft: true });
-syncSubmit();
-if (info) confirmWorkspaceReady();
-initUIEvents();
 
 // ------------------------------------------------------------------ wiring
 bus.on("file:selected", (file) => {
@@ -314,6 +385,7 @@ function resetJobView() {
   person.reset();
   preview.setTrack(null);
   rating.update(null);
+  library.reset();
   viewer.clear();
   trim.clear();
   show("btnRerun", false);

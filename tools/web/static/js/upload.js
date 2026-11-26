@@ -2,7 +2,7 @@
 import { $, show, formatBytes } from "./utils.js";
 import { message as m, setText } from "./i18n.js";
 
-const VIDEO_RE = /\.(mp4|mov|avi|mkv|webm|m4v)$/i;
+const VIDEO_RE = /\.(mp4|mov|avi|mkv|webm|m4v|gif|webp)$/i;
 
 export function initUpload(bus) {
   const dz = $("dropzone");

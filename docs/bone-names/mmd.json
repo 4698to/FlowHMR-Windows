@@ -1,0 +1,350 @@
+{
+  "skeleton": "MMD",
+  "profile": "vmd",
+  "source": "tools/web/static/js/generic-vmd.js genericVmdRig",
+  "total_bones": 56,
+  "notes": [
+    "FlowHMR 生成的通用 MMD 骨架（不依赖具体 PMX 模型），骨骼名为 PMX/VMD 标准日文命名。",
+    "左足ＩＫ、左つま先ＩＫ、右足ＩＫ、右つま先ＩＫ 为 IK 控制骨，不是蒙皮变形骨。",
+    "手指编号使用全角数字；拇指为 ０、１、２，其余手指为 １、２、３。",
+    "未包含 両目、左右目、足D、ひざD、腕捩 等模型专属或半标准骨。"
+  ],
+  "bones": [
+    {
+      "index": 0,
+      "name": "センター",
+      "parent": null,
+      "type": "joint"
+    },
+    {
+      "index": 1,
+      "name": "下半身",
+      "parent": "センター",
+      "type": "joint"
+    },
+    {
+      "index": 2,
+      "name": "上半身",
+      "parent": "センター",
+      "type": "joint"
+    },
+    {
+      "index": 3,
+      "name": "上半身2",
+      "parent": "上半身",
+      "type": "joint"
+    },
+    {
+      "index": 4,
+      "name": "首",
+      "parent": "上半身2",
+      "type": "joint"
+    },
+    {
+      "index": 5,
+      "name": "頭",
+      "parent": "首",
+      "type": "joint"
+    },
+    {
+      "index": 6,
+      "name": "左足",
+      "parent": "下半身",
+      "type": "joint"
+    },
+    {
+      "index": 7,
+      "name": "左ひざ",
+      "parent": "左足",
+      "type": "joint"
+    },
+    {
+      "index": 8,
+      "name": "左足首",
+      "parent": "左ひざ",
+      "type": "joint"
+    },
+    {
+      "index": 9,
+      "name": "左つま先",
+      "parent": "左足首",
+      "type": "joint"
+    },
+    {
+      "index": 10,
+      "name": "左足ＩＫ",
+      "parent": null,
+      "type": "control"
+    },
+    {
+      "index": 11,
+      "name": "左つま先ＩＫ",
+      "parent": "左足ＩＫ",
+      "type": "control"
+    },
+    {
+      "index": 12,
+      "name": "左肩",
+      "parent": "上半身2",
+      "type": "joint"
+    },
+    {
+      "index": 13,
+      "name": "左腕",
+      "parent": "左肩",
+      "type": "joint"
+    },
+    {
+      "index": 14,
+      "name": "左ひじ",
+      "parent": "左腕",
+      "type": "joint"
+    },
+    {
+      "index": 15,
+      "name": "左手首",
+      "parent": "左ひじ",
+      "type": "joint"
+    },
+    {
+      "index": 16,
+      "name": "左人指１",
+      "parent": "左手首",
+      "type": "joint"
+    },
+    {
+      "index": 17,
+      "name": "左人指２",
+      "parent": "左人指１",
+      "type": "joint"
+    },
+    {
+      "index": 18,
+      "name": "左人指３",
+      "parent": "左人指２",
+      "type": "joint"
+    },
+    {
+      "index": 19,
+      "name": "左中指１",
+      "parent": "左手首",
+      "type": "joint"
+    },
+    {
+      "index": 20,
+      "name": "左中指２",
+      "parent": "左中指１",
+      "type": "joint"
+    },
+    {
+      "index": 21,
+      "name": "左中指３",
+      "parent": "左中指２",
+      "type": "joint"
+    },
+    {
+      "index": 22,
+      "name": "左小指１",
+      "parent": "左手首",
+      "type": "joint"
+    },
+    {
+      "index": 23,
+      "name": "左小指２",
+      "parent": "左小指１",
+      "type": "joint"
+    },
+    {
+      "index": 24,
+      "name": "左小指３",
+      "parent": "左小指２",
+      "type": "joint"
+    },
+    {
+      "index": 25,
+      "name": "左薬指１",
+      "parent": "左手首",
+      "type": "joint"
+    },
+    {
+      "index": 26,
+      "name": "左薬指２",
+      "parent": "左薬指１",
+      "type": "joint"
+    },
+    {
+      "index": 27,
+      "name": "左薬指３",
+      "parent": "左薬指２",
+      "type": "joint"
+    },
+    {
+      "index": 28,
+      "name": "左親指０",
+      "parent": "左手首",
+      "type": "joint"
+    },
+    {
+      "index": 29,
+      "name": "左親指１",
+      "parent": "左親指０",
+      "type": "joint"
+    },
+    {
+      "index": 30,
+      "name": "左親指２",
+      "parent": "左親指１",
+      "type": "joint"
+    },
+    {
+      "index": 31,
+      "name": "右足",
+      "parent": "下半身",
+      "type": "joint"
+    },
+    {
+      "index": 32,
+      "name": "右ひざ",
+      "parent": "右足",
+      "type": "joint"
+    },
+    {
+      "index": 33,
+      "name": "右足首",
+      "parent": "右ひざ",
+      "type": "joint"
+    },
+    {
+      "index": 34,
+      "name": "右つま先",
+      "parent": "右足首",
+      "type": "joint"
+    },
+    {
+      "index": 35,
+      "name": "右足ＩＫ",
+      "parent": null,
+      "type": "control"
+    },
+    {
+      "index": 36,
+      "name": "右つま先ＩＫ",
+      "parent": "右足ＩＫ",
+      "type": "control"
+    },
+    {
+      "index": 37,
+      "name": "右肩",
+      "parent": "上半身2",
+      "type": "joint"
+    },
+    {
+      "index": 38,
+      "name": "右腕",
+      "parent": "右肩",
+      "type": "joint"
+    },
+    {
+      "index": 39,
+      "name": "右ひじ",
+      "parent": "右腕",
+      "type": "joint"
+    },
+    {
+      "index": 40,
+      "name": "右手首",
+      "parent": "右ひじ",
+      "type": "joint"
+    },
+    {
+      "index": 41,
+      "name": "右人指１",
+      "parent": "右手首",
+      "type": "joint"
+    },
+    {
+      "index": 42,
+      "name": "右人指２",
+      "parent": "右人指１",
+      "type": "joint"
+    },
+    {
+      "index": 43,
+      "name": "右人指３",
+      "parent": "右人指２",
+      "type": "joint"
+    },
+    {
+      "index": 44,
+      "name": "右中指１",
+      "parent": "右手首",
+      "type": "joint"
+    },
+    {
+      "index": 45,
+      "name": "右中指２",
+      "parent": "右中指１",
+      "type": "joint"
+    },
+    {
+      "index": 46,
+      "name": "右中指３",
+      "parent": "右中指２",
+      "type": "joint"
+    },
+    {
+      "index": 47,
+      "name": "右小指１",
+      "parent": "右手首",
+      "type": "joint"
+    },
+    {
+      "index": 48,
+      "name": "右小指２",
+      "parent": "右小指１",
+      "type": "joint"
+    },
+    {
+      "index": 49,
+      "name": "右小指３",
+      "parent": "右小指２",
+      "type": "joint"
+    },
+    {
+      "index": 50,
+      "name": "右薬指１",
+      "parent": "右手首",
+      "type": "joint"
+    },
+    {
+      "index": 51,
+      "name": "右薬指２",
+      "parent": "右薬指１",
+      "type": "joint"
+    },
+    {
+      "index": 52,
+      "name": "右薬指３",
+      "parent": "右薬指２",
+      "type": "joint"
+    },
+    {
+      "index": 53,
+      "name": "右親指０",
+      "parent": "右手首",
+      "type": "joint"
+    },
+    {
+      "index": 54,
+      "name": "右親指１",
+      "parent": "右親指０",
+      "type": "joint"
+    },
+    {
+      "index": 55,
+      "name": "右親指２",
+      "parent": "右親指１",
+      "type": "joint"
+    }
+  ]
+}

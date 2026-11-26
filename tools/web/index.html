@@ -24,6 +24,7 @@
           <button type="button" id="menuImport" data-i18n="menu.import">导入视频…</button>
           <button type="button" id="menuFbx" disabled data-i18n="menu.export_motion">导出动作…</button>
           <button type="button" id="menuNpz" disabled data-i18n="menu.export_npz">导出 NPZ…</button>
+          <button type="button" id="menuLibrary" data-i18n="library.menu">浏览公共参考库…</button>
           <button type="button" id="menuUpdates" class="hidden" data-i18n="update.check">检查更新…</button>
         </div>
       </details>
@@ -78,7 +79,7 @@
         <span class="preview-title" id="previewTitle"></span>
       </div>
       <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="选择视频" data-i18n-label="source.choose">
-        <input type="file" id="fileInput" accept="video/*" hidden>
+        <input type="file" id="fileInput" accept="video/*,.gif,.webp,image/gif,image/webp" hidden>
         <svg viewBox="0 0 24 24" class="drop-icon" aria-hidden="true">
           <path d="M7 16a4 4 0 01-.88-7.9A5 5 0 1115.9 6H16a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
                 fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -715,6 +716,7 @@
   <form method="dialog">
     <h3 class="card-title" id="ratingTitle" data-i18n="rating.title">评价本次生成</h3>
     <p class="setting-help" data-i18n="rating.hint">评分后才能下载 NPZ、FBX 等产物。</p>
+    <p class="setting-help" data-i18n="rating.library_hint">提交评分后，成片与动作会自动上传到公共参考库备份。</p>
     <div class="rating-stars" id="ratingStars" role="radiogroup" aria-label="评分">
       <button type="button" class="rating-star" data-score="1" aria-label="1">★</button>
       <button type="button" class="rating-star" data-score="2" aria-label="2">★</button>
@@ -722,14 +724,51 @@
       <button type="button" class="rating-star" data-score="4" aria-label="4">★</button>
       <button type="button" class="rating-star" data-score="5" aria-label="5">★</button>
     </div>
-    <div class="rating-tags" id="ratingTags"></div>
-    <textarea id="ratingComment" class="input" rows="2" maxlength="200" placeholder="评语（可选）" data-i18n-placeholder="rating.comment_placeholder"></textarea>
+    <input id="ratingTags" class="input" type="text" maxlength="200" placeholder="标签（可选），逗号分隔" data-i18n-placeholder="rating.tags_placeholder">
+    <textarea id="ratingComment" class="input" rows="2" maxlength="200" placeholder="备注（可选）" data-i18n-placeholder="rating.remark_placeholder"></textarea>
     <p class="error hidden" id="ratingError" role="alert"></p>
     <div class="fbx-export-actions">
       <button class="btn-secondary small" value="cancel" data-i18n="common.cancel">取消</button>
       <button class="btn-primary small" id="ratingSubmit" value="save" data-i18n="rating.submit">提交评分</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="libraryDialog" class="model-dialog library-dialog" aria-labelledby="libraryTitle">
+  <div class="model-dialog-head">
+    <h2 id="libraryTitle" data-i18n="library.title">公共动作参考库</h2>
+    <div class="model-actions">
+      <button type="button" class="btn-secondary small" id="libraryPrev" data-i18n="library.prev">上一页</button>
+      <span class="library-page" id="libraryPage"></span>
+      <button type="button" class="btn-secondary small" id="libraryNext" data-i18n="library.next">下一页</button>
+      <button type="button" class="editor-icon" id="libraryClose" aria-label="关闭" data-i18n-label="common.close">×</button>
+    </div>
+  </div>
+  <div class="library-toolbar">
+    <input type="search" class="input" id="libraryKeyword" placeholder="搜索名称或描述" data-i18n-placeholder="library.search_placeholder">
+    <select class="input" id="libraryMedia" aria-label="媒体类型" data-i18n-label="library.media_type">
+      <option value="" data-i18n="library.media_all">全部</option>
+      <option value="video" data-i18n="library.media_video">成片</option>
+      <option value="image" data-i18n="library.media_image">动作预览</option>
+    </select>
+    <button type="button" class="btn-secondary small" id="librarySearch" data-i18n="common.search">搜索</button>
+  </div>
+  <p class="library-status hidden" id="libraryStatus" role="status"></p>
+  <div class="library-body">
+    <div class="library-grid-wrap">
+      <div class="library-grid" id="libraryGrid"></div>
+      <p class="empty-note hidden" id="libraryEmpty" data-i18n="library.empty">暂无资源</p>
+    </div>
+    <aside class="library-detail hidden" id="libraryDetail" aria-live="polite">
+      <header class="library-detail-head">
+        <h3 id="libraryDetailTitle"></h3>
+        <button type="button" class="editor-icon" id="libraryDetailClose" aria-label="关闭" data-i18n-label="common.close">×</button>
+      </header>
+      <div class="library-detail-preview" id="libraryDetailPreview"></div>
+      <p class="library-detail-meta" id="libraryDetailMeta"></p>
+      <a class="btn-primary small" id="libraryDetailDownload" href="#" download data-i18n="library.download">下载</a>
+    </aside>
+  </div>
 </dialog>
 
 <dialog id="previewCharacterDialog" class="fbx-export-dialog character-dialog" aria-labelledby="previewCharacterTitle">
@@ -929,6 +968,34 @@
   </footer>
   <button type="button" id="retargetResize" aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight"
     data-i18n-label="retarget.resize" data-i18n-title="retarget.resize"></button>
+</dialog>
+
+<dialog id="authDialog" class="model-dialog auth-dialog" aria-labelledby="authTitle">
+  <header class="model-dialog-head">
+    <h2 id="authTitle" data-i18n="auth.title">登录公共动作参考库</h2>
+  </header>
+  <p class="model-hint" data-i18n="auth.hint">使用平台账号登录后即可提交和管理任务，昵称由平台统一管理。</p>
+  <p class="error hidden" id="authError" role="alert"></p>
+  <footer class="model-dialog-foot">
+    <span id="authStatus" class="model-hint" role="status"></span>
+    <button type="button" class="btn-primary" id="authLogin" data-i18n="auth.login">登录</button>
+  </footer>
+</dialog>
+
+<dialog id="accountDialog" class="model-dialog auth-dialog" aria-labelledby="accountTitle">
+  <header class="model-dialog-head">
+    <h2 id="accountTitle" data-i18n="auth.account_title">账号</h2>
+    <form method="dialog"><button type="submit" class="dialog-close" aria-label="Close">×</button></form>
+  </header>
+  <div class="mcp-fields">
+    <label><span data-i18n="auth.account_name">昵称</span><input class="input" id="accountName" readonly></label>
+    <label><span data-i18n="auth.account_code">登录名</span><input class="input" id="accountCode" readonly></label>
+    <label><span data-i18n="auth.account_roles">角色</span><input class="input" id="accountRoles" readonly></label>
+  </div>
+  <footer class="model-dialog-foot">
+    <span class="model-hint" data-i18n="auth.name_managed_hint">昵称由公共动作参考库统一管理。</span>
+    <button type="button" class="btn-secondary" id="accountLogout" data-i18n="auth.logout">退出登录</button>
+  </footer>
 </dialog>
 
 <script type="module" src="/static/js/main.js"></script>

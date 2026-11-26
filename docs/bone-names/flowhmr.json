@@ -1,0 +1,403 @@
+{
+  "skeleton": "FlowHMR",
+  "profile": "flowhmr",
+  "source": "flowhmr/core/export/smplh2fbx.py FBX_JOINT_NAMES + build_skeleton_nodes",
+  "total_bones": 65,
+  "notes": [
+    "0-51 为 SMPL-H 52 个关节按导出顺序；52-64 为末端 tip 骨，命名为 <骨骼名>_end。",
+    "根骨为 Hips，没有额外 Root 骨。",
+    "混合蒙皮 FBX 与不带网格的动画 FBX 都使用这套命名。"
+  ],
+  "bones": [
+    {
+      "index": 0,
+      "name": "Hips",
+      "parent": null,
+      "type": "joint"
+    },
+    {
+      "index": 1,
+      "name": "LeftUpLeg",
+      "parent": "Hips",
+      "type": "joint"
+    },
+    {
+      "index": 2,
+      "name": "RightUpLeg",
+      "parent": "Hips",
+      "type": "joint"
+    },
+    {
+      "index": 3,
+      "name": "Spine",
+      "parent": "Hips",
+      "type": "joint"
+    },
+    {
+      "index": 4,
+      "name": "LeftLeg",
+      "parent": "LeftUpLeg",
+      "type": "joint"
+    },
+    {
+      "index": 5,
+      "name": "RightLeg",
+      "parent": "RightUpLeg",
+      "type": "joint"
+    },
+    {
+      "index": 6,
+      "name": "Spine1",
+      "parent": "Spine",
+      "type": "joint"
+    },
+    {
+      "index": 7,
+      "name": "LeftFoot",
+      "parent": "LeftLeg",
+      "type": "joint"
+    },
+    {
+      "index": 8,
+      "name": "RightFoot",
+      "parent": "RightLeg",
+      "type": "joint"
+    },
+    {
+      "index": 9,
+      "name": "Spine2",
+      "parent": "Spine1",
+      "type": "joint"
+    },
+    {
+      "index": 10,
+      "name": "LeftToeBase",
+      "parent": "LeftFoot",
+      "type": "joint"
+    },
+    {
+      "index": 11,
+      "name": "RightToeBase",
+      "parent": "RightFoot",
+      "type": "joint"
+    },
+    {
+      "index": 12,
+      "name": "Neck",
+      "parent": "Spine2",
+      "type": "joint"
+    },
+    {
+      "index": 13,
+      "name": "LeftShoulder",
+      "parent": "Spine2",
+      "type": "joint"
+    },
+    {
+      "index": 14,
+      "name": "RightShoulder",
+      "parent": "Spine2",
+      "type": "joint"
+    },
+    {
+      "index": 15,
+      "name": "Head",
+      "parent": "Neck",
+      "type": "joint"
+    },
+    {
+      "index": 16,
+      "name": "LeftArm",
+      "parent": "LeftShoulder",
+      "type": "joint"
+    },
+    {
+      "index": 17,
+      "name": "RightArm",
+      "parent": "RightShoulder",
+      "type": "joint"
+    },
+    {
+      "index": 18,
+      "name": "LeftForeArm",
+      "parent": "LeftArm",
+      "type": "joint"
+    },
+    {
+      "index": 19,
+      "name": "RightForeArm",
+      "parent": "RightArm",
+      "type": "joint"
+    },
+    {
+      "index": 20,
+      "name": "LeftHand",
+      "parent": "LeftForeArm",
+      "type": "joint"
+    },
+    {
+      "index": 21,
+      "name": "RightHand",
+      "parent": "RightForeArm",
+      "type": "joint"
+    },
+    {
+      "index": 22,
+      "name": "LeftHandIndex1",
+      "parent": "LeftHand",
+      "type": "joint"
+    },
+    {
+      "index": 23,
+      "name": "LeftHandIndex2",
+      "parent": "LeftHandIndex1",
+      "type": "joint"
+    },
+    {
+      "index": 24,
+      "name": "LeftHandIndex3",
+      "parent": "LeftHandIndex2",
+      "type": "joint"
+    },
+    {
+      "index": 25,
+      "name": "LeftHandMiddle1",
+      "parent": "LeftHand",
+      "type": "joint"
+    },
+    {
+      "index": 26,
+      "name": "LeftHandMiddle2",
+      "parent": "LeftHandMiddle1",
+      "type": "joint"
+    },
+    {
+      "index": 27,
+      "name": "LeftHandMiddle3",
+      "parent": "LeftHandMiddle2",
+      "type": "joint"
+    },
+    {
+      "index": 28,
+      "name": "LeftHandPinky1",
+      "parent": "LeftHand",
+      "type": "joint"
+    },
+    {
+      "index": 29,
+      "name": "LeftHandPinky2",
+      "parent": "LeftHandPinky1",
+      "type": "joint"
+    },
+    {
+      "index": 30,
+      "name": "LeftHandPinky3",
+      "parent": "LeftHandPinky2",
+      "type": "joint"
+    },
+    {
+      "index": 31,
+      "name": "LeftHandRing1",
+      "parent": "LeftHand",
+      "type": "joint"
+    },
+    {
+      "index": 32,
+      "name": "LeftHandRing2",
+      "parent": "LeftHandRing1",
+      "type": "joint"
+    },
+    {
+      "index": 33,
+      "name": "LeftHandRing3",
+      "parent": "LeftHandRing2",
+      "type": "joint"
+    },
+    {
+      "index": 34,
+      "name": "LeftHandThumb1",
+      "parent": "LeftHand",
+      "type": "joint"
+    },
+    {
+      "index": 35,
+      "name": "LeftHandThumb2",
+      "parent": "LeftHandThumb1",
+      "type": "joint"
+    },
+    {
+      "index": 36,
+      "name": "LeftHandThumb3",
+      "parent": "LeftHandThumb2",
+      "type": "joint"
+    },
+    {
+      "index": 37,
+      "name": "RightHandIndex1",
+      "parent": "RightHand",
+      "type": "joint"
+    },
+    {
+      "index": 38,
+      "name": "RightHandIndex2",
+      "parent": "RightHandIndex1",
+      "type": "joint"
+    },
+    {
+      "index": 39,
+      "name": "RightHandIndex3",
+      "parent": "RightHandIndex2",
+      "type": "joint"
+    },
+    {
+      "index": 40,
+      "name": "RightHandMiddle1",
+      "parent": "RightHand",
+      "type": "joint"
+    },
+    {
+      "index": 41,
+      "name": "RightHandMiddle2",
+      "parent": "RightHandMiddle1",
+      "type": "joint"
+    },
+    {
+      "index": 42,
+      "name": "RightHandMiddle3",
+      "parent": "RightHandMiddle2",
+      "type": "joint"
+    },
+    {
+      "index": 43,
+      "name": "RightHandPinky1",
+      "parent": "RightHand",
+      "type": "joint"
+    },
+    {
+      "index": 44,
+      "name": "RightHandPinky2",
+      "parent": "RightHandPinky1",
+      "type": "joint"
+    },
+    {
+      "index": 45,
+      "name": "RightHandPinky3",
+      "parent": "RightHandPinky2",
+      "type": "joint"
+    },
+    {
+      "index": 46,
+      "name": "RightHandRing1",
+      "parent": "RightHand",
+      "type": "joint"
+    },
+    {
+      "index": 47,
+      "name": "RightHandRing2",
+      "parent": "RightHandRing1",
+      "type": "joint"
+    },
+    {
+      "index": 48,
+      "name": "RightHandRing3",
+      "parent": "RightHandRing2",
+      "type": "joint"
+    },
+    {
+      "index": 49,
+      "name": "RightHandThumb1",
+      "parent": "RightHand",
+      "type": "joint"
+    },
+    {
+      "index": 50,
+      "name": "RightHandThumb2",
+      "parent": "RightHandThumb1",
+      "type": "joint"
+    },
+    {
+      "index": 51,
+      "name": "RightHandThumb3",
+      "parent": "RightHandThumb2",
+      "type": "joint"
+    },
+    {
+      "index": 52,
+      "name": "LeftToeBase_end",
+      "parent": "LeftToeBase",
+      "type": "tip"
+    },
+    {
+      "index": 53,
+      "name": "RightToeBase_end",
+      "parent": "RightToeBase",
+      "type": "tip"
+    },
+    {
+      "index": 54,
+      "name": "Head_end",
+      "parent": "Head",
+      "type": "tip"
+    },
+    {
+      "index": 55,
+      "name": "LeftHandIndex3_end",
+      "parent": "LeftHandIndex3",
+      "type": "tip"
+    },
+    {
+      "index": 56,
+      "name": "LeftHandMiddle3_end",
+      "parent": "LeftHandMiddle3",
+      "type": "tip"
+    },
+    {
+      "index": 57,
+      "name": "LeftHandPinky3_end",
+      "parent": "LeftHandPinky3",
+      "type": "tip"
+    },
+    {
+      "index": 58,
+      "name": "LeftHandRing3_end",
+      "parent": "LeftHandRing3",
+      "type": "tip"
+    },
+    {
+      "index": 59,
+      "name": "LeftHandThumb3_end",
+      "parent": "LeftHandThumb3",
+      "type": "tip"
+    },
+    {
+      "index": 60,
+      "name": "RightHandIndex3_end",
+      "parent": "RightHandIndex3",
+      "type": "tip"
+    },
+    {
+      "index": 61,
+      "name": "RightHandMiddle3_end",
+      "parent": "RightHandMiddle3",
+      "type": "tip"
+    },
+    {
+      "index": 62,
+      "name": "RightHandPinky3_end",
+      "parent": "RightHandPinky3",
+      "type": "tip"
+    },
+    {
+      "index": 63,
+      "name": "RightHandRing3_end",
+      "parent": "RightHandRing3",
+      "type": "tip"
+    },
+    {
+      "index": 64,
+      "name": "RightHandThumb3_end",
+      "parent": "RightHandThumb3",
+      "type": "tip"
+    }
+  ]
+}
